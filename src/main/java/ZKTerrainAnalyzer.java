@@ -53,6 +53,8 @@ public class ZKTerrainAnalyzer {
         regions = pruneGraph(convertGraph(voronoid.get_graph_reference()));
         calculateNodeRadii(regions);
         identifyRegionsAndChokepoints(regions);
+        pruneContainedChokepoints(regions);
+        skipUnmarkedVertices(regions);
     }
 
     public int[][] getLabelMap(){
@@ -227,6 +229,103 @@ public class ZKTerrainAnalyzer {
         System.out.println("- Chokepoints: " + graph.chokepointNodes.size());
         System.out.println("- Dual-marked nodes: " + dualMarked);
         System.out.println("- Unmarked nodes: " + (graph.nodes.size() - graph.regionNodes.size() - graph.chokepointNodes.size()));
+    }
+
+    private void pruneContainedChokepoints(RegionGraph graph) {
+        System.out.println("Pruning chokepoints contained within region nodes...");
+
+        ArrayList<Node> chokepointsToRemove = new ArrayList<>();
+
+        for (Node chokepoint : graph.chokepointNodes) {
+            for (Node region : graph.regionNodes) {
+                // Calculate distance between chokepoint and region node
+                double dx = chokepoint.position.x - region.position.x;
+                double dy = chokepoint.position.y - region.position.y;
+                double distanceToRegion = Math.sqrt(dx * dx + dy * dy);
+
+                // Check if chokepoint is contained within region's inscribed circle
+                if (chokepoint.radius + distanceToRegion < region.radius) {
+                    System.out.println("Chokepoint @" + chokepoint.position +
+                                     " (radius=" + String.format("%.1f", chokepoint.radius) +
+                                     ") contained within region @" + region.position +
+                                     " (radius=" + String.format("%.1f", region.radius) +
+                                     ", distance=" + String.format("%.1f", distanceToRegion) + ")");
+                    chokepointsToRemove.add(chokepoint);
+                    break; // No need to check other regions for this chokepoint
+                }
+            }
+        }
+
+        // Remove the contained chokepoints
+        for (Node chokepoint : chokepointsToRemove) {
+            graph.chokepointNodes.remove(chokepoint);
+        }
+
+        System.out.println("Removed " + chokepointsToRemove.size() + " contained chokepoints");
+        System.out.println("Final counts after pruning:");
+        System.out.println("- Regions: " + graph.regionNodes.size());
+        System.out.println("- Chokepoints: " + graph.chokepointNodes.size());
+    }
+
+    private void skipUnmarkedVertices(RegionGraph graph) {
+        System.out.println("Skipping through unmarked vertices to connect marked nodes directly...");
+
+        int chainsSkipped = 0;
+        int nodesRemoved = 0;
+
+        // Find all unmarked nodes (nodes that are neither regions nor chokepoints)
+        ArrayList<Node> unmarkedNodes = new ArrayList<>();
+        for (Node n : graph.nodes) {
+            if (!graph.regionNodes.contains(n) && !graph.chokepointNodes.contains(n)) {
+                unmarkedNodes.add(n);
+            }
+        }
+
+        System.out.println("Found " + unmarkedNodes.size() + " unmarked nodes to potentially skip");
+
+        // Process each unmarked node
+        ArrayList<Node> nodesToRemove = new ArrayList<>();
+        for (Node unmarked : unmarkedNodes) {
+            if (unmarked.neighbours.size() == 2) {
+                // This is a degree-2 node that can be skipped
+                Node neighbor1 = null;
+                Node neighbor2 = null;
+
+                // Get the two neighbors
+                Iterator<Node> neighborIter = unmarked.neighbours.iterator();
+                neighbor1 = neighborIter.next();
+                neighbor2 = neighborIter.next();
+
+                // Connect the neighbors directly, bypassing this unmarked node
+                neighbor1.neighbours.remove(unmarked);
+                neighbor2.neighbours.remove(unmarked);
+
+                neighbor1.neighbours.add(neighbor2);
+                neighbor2.neighbours.add(neighbor1);
+
+                // Mark this node for removal
+                nodesToRemove.add(unmarked);
+                nodesRemoved++;
+
+                System.out.println("Skipped unmarked node @" + unmarked.position +
+                                 ", directly connected @" + neighbor1.position +
+                                 " to @" + neighbor2.position);
+            }
+        }
+
+        // Remove all the skipped nodes from the graph
+        for (Node node : nodesToRemove) {
+            graph.nodes.remove(node);
+        }
+
+        // Count how many chains were simplified
+        chainsSkipped = nodesRemoved;
+
+        System.out.println("Unmarked vertex skipping complete:");
+        System.out.println("- Nodes removed: " + nodesRemoved);
+        System.out.println("- Remaining nodes: " + graph.nodes.size());
+        System.out.println("- Remaining regions: " + graph.regionNodes.size());
+        System.out.println("- Remaining chokepoints: " + graph.chokepointNodes.size());
     }
 
     private RegionGraph convertGraph(HalfEdgeDiagram g){
