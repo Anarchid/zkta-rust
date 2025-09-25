@@ -285,6 +285,8 @@ public class ZKTerrainAnalyzer {
 
         // Process each unmarked node
         ArrayList<Node> nodesToRemove = new ArrayList<>();
+        int leafNodesRemoved = 0;
+
         for (Node unmarked : unmarkedNodes) {
             if (unmarked.neighbours.size() == 2) {
                 // This is a degree-2 node that can be skipped
@@ -310,7 +312,23 @@ public class ZKTerrainAnalyzer {
                 System.out.println("Skipped unmarked node @" + unmarked.position +
                                  ", directly connected @" + neighbor1.position +
                                  " to @" + neighbor2.position);
+            } else if (unmarked.neighbours.size() == 1) {
+                // This is an unmarked leaf node - just remove it
+                Node neighbor = unmarked.neighbours.iterator().next();
+                neighbor.neighbours.remove(unmarked);
+
+                nodesToRemove.add(unmarked);
+                leafNodesRemoved++;
+
+                System.out.println("Removed unmarked leaf node @" + unmarked.position);
+            } else if (unmarked.neighbours.size() == 0) {
+                // Isolated unmarked node - remove it
+                nodesToRemove.add(unmarked);
+                leafNodesRemoved++;
+
+                System.out.println("Removed isolated unmarked node @" + unmarked.position);
             }
+            // Nodes with degree > 2 are kept even if unmarked (they're junction points)
         }
 
         // Remove all the skipped nodes from the graph
@@ -322,7 +340,9 @@ public class ZKTerrainAnalyzer {
         chainsSkipped = nodesRemoved;
 
         System.out.println("Unmarked vertex skipping complete:");
-        System.out.println("- Nodes removed: " + nodesRemoved);
+        System.out.println("- Degree-2 nodes skipped: " + nodesRemoved);
+        System.out.println("- Unmarked leaf nodes removed: " + leafNodesRemoved);
+        System.out.println("- Total nodes removed: " + (nodesRemoved + leafNodesRemoved));
         System.out.println("- Remaining nodes: " + graph.nodes.size());
         System.out.println("- Remaining regions: " + graph.regionNodes.size());
         System.out.println("- Remaining chokepoints: " + graph.chokepointNodes.size());
