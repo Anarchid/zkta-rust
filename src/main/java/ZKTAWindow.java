@@ -174,6 +174,25 @@ public class ZKTAWindow {
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
             }
 
+            // Draw inscribed circles for regions with low-opacity teal
+            Graphics2D g2d = (Graphics2D) bg;
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.2f)); // 20% opacity
+            g2d.setColor(new Color(64, 224, 208)); // Turquoise
+            for(Node n:r.regionNodes){
+                int radius = (int)n.radius;
+                g2d.drawOval(n.position.x - radius, n.position.y - radius, 2 * radius, 2 * radius);
+            }
+
+            // Draw inscribed circles for chokepoints with low-opacity red
+            g2d.setColor(Color.RED);
+            for(Node n:r.chokepointNodes){
+                int radius = (int)n.radius;
+                g2d.drawOval(n.position.x - radius, n.position.y - radius, 2 * radius, 2 * radius);
+            }
+
+            // Reset to full opacity for subsequent drawing
+            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
+
             bg.setColor(Color.YELLOW);
             for(int i = 0; i < simple.size();i++){
                 Contour contour = simple.get(i);
