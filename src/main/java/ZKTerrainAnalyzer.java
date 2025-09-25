@@ -105,6 +105,18 @@ public class ZKTerrainAnalyzer {
 
     private RegionGraph pruneGraph(RegionGraph graph)
     {
+        // Mark all nodes with degree != 2 as region candidates BEFORE pruning
+        int regionCandidates = 0;
+        for(Node n : graph.nodes) {
+            int degree = n.neighbours.size();
+            if(degree != 2) {
+                System.out.println("Marking node @" + n.position + " as region (degree=" + degree + ")");
+                graph.setNodeAsRegion(n);
+                regionCandidates++;
+            }
+        }
+        System.out.println("Found "+regionCandidates+" region candidate nodes (degree != 2) before pruning");
+
         // get the list of all leafs (nodes with only one element in the adjacent list)
         LinkedList<Node> nodeToPrune = new LinkedList<>();
         for(Node n:graph.nodes){
@@ -141,12 +153,14 @@ public class ZKTerrainAnalyzer {
             }else{
                 dist_1 = getDistanceToObstacle(n1);
                 System.out.println("Parent node distance to obstacle: "+dist_1);
-                deleted = true;
-                if(dist_0 - 0.9 < dist_1){
+                // Only remove if significantly closer to obstacle than parent AND parent is not too close
+                if(dist_0 - 0.9 < dist_1 && dist_1 > TOO_CLOSE_TO_OBSTACLE){
                     System.out.println("Parent is farther from obstacle - removing!");
-
+                    deleted = true;
                     removed++;
                     graph.removeNode(n0);
+                } else {
+                    deleted = false; // Don't remove this node
                 }
             }
 
@@ -165,6 +179,8 @@ public class ZKTerrainAnalyzer {
         }
         System.out.println("Total nodes removed during discovery "+removed);
         System.out.println("Total nodes retained during discovery: "+graph.nodes.size());
+        System.out.println("Total region nodes after pruning: " + graph.regionNodes.size());
+
         return graph;
     }
 

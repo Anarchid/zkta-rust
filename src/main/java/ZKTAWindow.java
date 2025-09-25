@@ -152,14 +152,20 @@ public class ZKTAWindow {
                     bg.drawLine(v1[0],v1[1],v2[0],v2[1]);
                 }
             }
-            bg.setColor(Color.ORANGE);
             RegionGraph r = zkta.getRegions();
-            for(Node n:r.regionNodes){
-                bg.drawOval(n.position.x - 4, n.position.y - 4, 8, 8);
+
+            // Draw regular nodes in orange
+            bg.setColor(Color.ORANGE);
+            for(Node n:r.nodes){
+                if(!r.regionNodes.contains(n)){
+                    bg.fillOval(n.position.x - 2, n.position.y - 2, 4, 4);
+                }
             }
 
-            for(Node n:r.nodes){
-                bg.fillOval(n.position.x - 2, n.position.y - 2, 4, 4);
+            // Draw region seed nodes in turquoise
+            bg.setColor(new Color(64, 224, 208)); // Turquoise color
+            for(Node n:r.regionNodes){
+                bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
             }
 
             bg.setColor(Color.YELLOW);
