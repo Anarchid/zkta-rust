@@ -98,4 +98,48 @@ public class Contour {
         ordered.sort((a, b) -> Integer.compare(a.segmentIndex, b.segmentIndex));
         return ordered;
     }
+
+    // Get the segment points for a given segment index
+    public Point[] getSegmentPoints(int segmentIndex) {
+        if (segmentIndex < 0 || segmentIndex >= getSegmentCount()) {
+            return null;
+        }
+        Point startPoint = points.get(segmentIndex);
+        Point endPoint = points.get((segmentIndex + 1) % points.size());
+        return new Point[]{startPoint, endPoint};
+    }
+
+    // Get the total number of segments in this contour
+    public int getSegmentCount() {
+        return points.size(); // Each point connects to the next, including wrap-around
+    }
+
+    // Check if this contour is closed by following segment connectivity
+    public boolean isClosedByConnectivity() {
+        if (points.size() < 3) {
+            return false; // Need at least 3 points for a closed polygon
+        }
+
+        // For a closed contour, every point should appear exactly twice in the segment graph:
+        // once as a start point and once as an end point
+        java.util.HashMap<Point, Integer> pointCount = new java.util.HashMap<>();
+
+        for (int i = 0; i < points.size(); i++) {
+            Point startPoint = points.get(i);
+            Point endPoint = points.get((i + 1) % points.size());
+
+            // Count each point's appearances
+            pointCount.put(startPoint, pointCount.getOrDefault(startPoint, 0) + 1);
+            pointCount.put(endPoint, pointCount.getOrDefault(endPoint, 0) + 1);
+        }
+
+        // In a closed contour, each point should appear exactly twice (start + end)
+        for (Integer count : pointCount.values()) {
+            if (count != 2) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }

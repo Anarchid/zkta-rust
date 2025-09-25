@@ -72,6 +72,9 @@ public class ZKTerrainAnalyzer {
 
         // Build region boundaries from chokepoint contacts
         buildRegionBoundariesFromChokepoints(regions);
+
+        // Test: Check if obstacle contours themselves are properly identified as closed
+        testObstacleContourClosedness();
     }
 
     public int[][] getLabelMap(){
@@ -939,81 +942,99 @@ public class ZKTerrainAnalyzer {
     }
 
     private ArrayList<Point> traceContourBetweenChokepoints(Point startPoint, Node targetChokepoint, Node regionNode) {
-        ArrayList<Point> path = new ArrayList<>();
-        path.add(startPoint);
-
         // Find the contour containing both the start point and target chokepoint
         ArrayList<Contour> contours = getSimplifiedContours();
 
         for (Contour contour : contours) {
-            // Check if this contour contains both points
-            int startSegmentIndex = -1;
-            int targetSegmentIndex = -1;
-            Point targetContactPoint = null;
-
-            // Find start point segment
-            for (int i = 0; i < contour.length() - 1; i++) {
-                Point p1 = contour.getPoint(i);
-                Point p2 = contour.getPoint(i + 1);
-                if (isPointOnSegment(startPoint, p1, p2, 2.0)) {
-                    startSegmentIndex = i;
-                    break;
-                }
-            }
+            // Find start point on contour
+            int startIndex = findPointOnContour(contour, startPoint);
+            if (startIndex == -1) continue;
 
             // Find target chokepoint contact
+            Point targetContactPoint = null;
+            int targetIndex = -1;
             for (Contour.ChokepointContact contact : contour.getChokepointContacts()) {
                 if (contact.chokepoint == targetChokepoint) {
-                    targetSegmentIndex = contact.segmentIndex;
                     targetContactPoint = contact.contactPoint;
+                    targetIndex = findPointOnContour(contour, targetContactPoint);
                     break;
                 }
             }
 
-            if (startSegmentIndex != -1 && targetSegmentIndex != -1 && targetContactPoint != null) {
-                System.out.println("      Tracing contour from segment " + startSegmentIndex + " to segment " + targetSegmentIndex);
+            if (targetIndex != -1 && targetContactPoint != null) {
+                System.out.println("      Tracing contour from index " + startIndex + " to index " + targetIndex);
 
-                // Trace along the contour from start to target
-                int currentIndex = startSegmentIndex;
-                int steps = 0;
-                int maxSteps = contour.length(); // Safety limit
+                // Try both directions and pick the shorter path
+                ArrayList<Point> clockwisePath = traceInDirection(contour, startIndex, targetIndex, true);
+                ArrayList<Point> counterClockwisePath = traceInDirection(contour, startIndex, targetIndex, false);
 
-                // Determine direction: should we go forward or backward along the contour?
-                // For now, always go forward (counterclockwise)
-                boolean reachedTarget = false;
+                // Return the shorter complete path
+                ArrayList<Point> chosenPath = (clockwisePath.size() <= counterClockwisePath.size()) ?
+                                             clockwisePath : counterClockwisePath;
 
-                while (steps < maxSteps && !reachedTarget) {
-                    // Move to next point in contour
-                    currentIndex = (currentIndex + 1) % contour.length();
-                    Point currentPoint = contour.getPoint(currentIndex);
-                    path.add(currentPoint);
-
-                    // Check if we've reached the target segment
-                    if (currentIndex == targetSegmentIndex ||
-                        (currentIndex == (targetSegmentIndex + 1) % contour.length())) {
-                        // We've reached the target segment, add the exact contact point if different
-                        if (!currentPoint.equals(targetContactPoint) &&
-                            !path.get(path.size() - 1).equals(targetContactPoint)) {
-                            path.add(targetContactPoint);
-                        }
-                        reachedTarget = true;
-                    }
-
-                    steps++;
-                }
-
-                if (!reachedTarget) {
-                    System.out.println("      Warning: Could not reach target along contour, adding direct connection");
-                    path.add(targetContactPoint);
-                }
-
-                System.out.println("      Traced " + (path.size() - 1) + " contour points");
-                return path;
+                System.out.println("      Traced " + (chosenPath.size() - 1) + " contour points");
+                return chosenPath;
             }
         }
 
-        // Fallback: direct connection
+        // Fallback: direct connection (should rarely happen now)
         System.out.println("      Could not find shared contour, using direct connection");
+        ArrayList<Point> fallbackPath = new ArrayList<>();
+        fallbackPath.add(startPoint);
+        return fallbackPath;
+    }
+
+    private int findPointOnContour(Contour contour, Point targetPoint) {
+        // First try to find exact point match
+        for (int i = 0; i < contour.length(); i++) {
+            if (contour.getPoint(i).equals(targetPoint)) {
+                return i;
+            }
+        }
+
+        // If no exact match, find point on segment
+        for (int i = 0; i < contour.length() - 1; i++) {
+            Point p1 = contour.getPoint(i);
+            Point p2 = contour.getPoint(i + 1);
+            if (isPointOnSegment(targetPoint, p1, p2, 2.0)) {
+                return i; // Return the segment start index
+            }
+        }
+
+        return -1;
+    }
+
+    private ArrayList<Point> traceInDirection(Contour contour, int startIndex, int targetIndex, boolean clockwise) {
+        ArrayList<Point> path = new ArrayList<>();
+        path.add(contour.getPoint(startIndex));
+
+        int currentIndex = startIndex;
+        int contourLength = contour.length();
+
+        // Walk around the contour until we reach the target
+        while (true) {
+            // Move in the specified direction
+            if (clockwise) {
+                currentIndex = (currentIndex + 1) % contourLength;
+            } else {
+                currentIndex = (currentIndex - 1 + contourLength) % contourLength;
+            }
+
+            Point currentPoint = contour.getPoint(currentIndex);
+            path.add(currentPoint);
+
+            // Stop when we reach the target index
+            if (currentIndex == targetIndex) {
+                break;
+            }
+
+            // Safety check - should never happen with correct logic
+            if (path.size() > contourLength) {
+                System.out.println("      ERROR: Path exceeded contour length - breaking");
+                break;
+            }
+        }
+
         return path;
     }
 
@@ -1398,6 +1419,7 @@ public class ZKTerrainAnalyzer {
                 // Isolated region with no chokepoints - create circular boundary
                 System.out.println("  Isolated region - creating circular boundary");
                 region.setPolygon(createCircularBoundary(regionNode));
+                region.isClosed = true;  // Circular boundaries are always closed
                 regionList.add(region);
                 continue;
             }
@@ -1494,22 +1516,74 @@ public class ZKTerrainAnalyzer {
                 }
             }
 
+
             // Set the boundary polygon for the region
             if (!boundaryPoints.isEmpty()) {
                 // Sort points to form a proper polygon
                 ArrayList<Point> sortedBoundary = sortBoundaryPoints(regionNode.position, boundaryPoints);
                 region.setPolygon(sortedBoundary);
-                System.out.println("  Generated region boundary with " + sortedBoundary.size() + " points");
+
+                // Check if the boundary forms a closed polygon
+                // A boundary is considered closed if consecutive points are connected
+                // (no large gaps between them)
+                boolean isClosed = checkBoundaryConnectivity(sortedBoundary);
+                region.isClosed = isClosed;
+
+                System.out.println("  Generated region boundary with " + sortedBoundary.size() +
+                                 " points (" + (isClosed ? "CLOSED" : "OPEN") + ")");
             } else {
                 // Fallback to circular boundary if no valid path found
                 System.out.println("  No valid boundary paths found - using circular fallback");
-                region.setPolygon(createCircularBoundary(regionNode));
+                ArrayList<Point> circularBoundary = createCircularBoundary(regionNode);
+                region.setPolygon(circularBoundary);
+                region.isClosed = true;  // Circular boundaries are always closed
             }
 
             regionList.add(region);
         }
 
         System.out.println("\nGenerated boundaries for " + regionList.size() + " regions");
+    }
+
+    private void testObstacleContourClosedness() {
+        System.out.println("\n=== Testing Obstacle Contour Closedness ===");
+
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        for (int i = 0; i < Math.min(3, contours.size()); i++) {
+            Contour contour = contours.get(i);
+            System.out.println("Testing contour " + i + " with " + contour.length() + " points");
+
+            // Create a boundary by tracing the entire contour
+            ArrayList<Point> contourBoundary = new ArrayList<>();
+            for (int j = 0; j < contour.length(); j++) {
+                contourBoundary.add(contour.getPoint(j));
+            }
+
+            // Test if it's identified as closed using our connectivity check
+            boolean isClosed = checkBoundaryConnectivity(contourBoundary);
+            System.out.println("  Contour " + i + " closedness check: " + (isClosed ? "CLOSED" : "OPEN"));
+
+            // Also test our bidirectional tracing on this contour
+            if (contour.length() > 2) {
+                ArrayList<Point> clockwisePath = traceInDirection(contour, 0, contour.length() / 2, true);
+                ArrayList<Point> counterClockwisePath = traceInDirection(contour, 0, contour.length() / 2, false);
+
+                System.out.println("  Bidirectional tracing test:");
+                System.out.println("    Clockwise path: " + clockwisePath.size() + " points");
+                System.out.println("    Counter-clockwise path: " + counterClockwisePath.size() + " points");
+                System.out.println("    Expected: " + (contour.length() / 2 + 1) + " points each direction");
+
+                // Check if both paths have reasonable lengths
+                int expectedLength = contour.length() / 2 + 1;
+                boolean clockwiseOK = Math.abs(clockwisePath.size() - expectedLength) <= 2;
+                boolean counterClockwiseOK = Math.abs(counterClockwisePath.size() - expectedLength) <= 2;
+
+                System.out.println("    Bidirectional tracing: " +
+                    (clockwiseOK && counterClockwiseOK ? "PASS" : "FAIL"));
+            }
+        }
+        System.out.println("=== End Obstacle Contour Test ===\n");
     }
 
     private ArrayList<Point> findShortestPathAlongContour(
@@ -1577,6 +1651,85 @@ public class ZKTerrainAnalyzer {
         Point first = (p1.x < p2.x || (p1.x == p2.x && p1.y < p2.y)) ? p1 : p2;
         Point second = (first == p1) ? p2 : p1;
         return first.x + "," + first.y + "-" + second.x + "," + second.y;
+    }
+
+    private boolean checkBoundaryConnectivity(ArrayList<Point> boundary) {
+        if (boundary.size() < 3) {
+            return false;  // Need at least 3 points for a polygon
+        }
+
+        // Create a proper graph-based connectivity check
+        // For a closed boundary, each point should appear exactly twice in the edge graph:
+        // once as a start point and once as an end point
+        java.util.HashMap<Point, Integer> pointDegree = new java.util.HashMap<>();
+
+        // Count how many times each point appears as part of an edge
+        for (int i = 0; i < boundary.size(); i++) {
+            Point current = boundary.get(i);
+            Point next = boundary.get((i + 1) % boundary.size());
+
+            // Only count if points are not identical (avoid self-loops)
+            if (current != next) {
+                pointDegree.put(current, pointDegree.getOrDefault(current, 0) + 1);
+                pointDegree.put(next, pointDegree.getOrDefault(next, 0) + 1);
+            }
+        }
+
+        // For a properly closed boundary, each point should have degree 2
+        // (connected to exactly 2 other points)
+        for (java.util.Map.Entry<Point, Integer> entry : pointDegree.entrySet()) {
+            if (entry.getValue() != 2) {
+                System.out.println("Point " + entry.getKey() + " has degree " + entry.getValue() + " instead of 2");
+                return false;
+            }
+        }
+
+        // Additional check: ensure we can traverse the entire boundary
+        return canTraverseBoundary(boundary);
+    }
+
+    private boolean canTraverseBoundary(ArrayList<Point> boundary) {
+        if (boundary.isEmpty()) return false;
+
+        // Build adjacency map using point identity (==)
+        java.util.HashMap<Point, java.util.ArrayList<Point>> adjacency = new java.util.HashMap<>();
+
+        for (int i = 0; i < boundary.size(); i++) {
+            Point current = boundary.get(i);
+            Point next = boundary.get((i + 1) % boundary.size());
+
+            if (current != next) { // Use identity comparison, not equals
+                adjacency.computeIfAbsent(current, k -> new java.util.ArrayList<>()).add(next);
+                adjacency.computeIfAbsent(next, k -> new java.util.ArrayList<>()).add(current);
+            }
+        }
+
+        // Try to traverse from the first point
+        Point start = boundary.get(0);
+        java.util.HashSet<Point> visited = new java.util.HashSet<>();
+        return traverseFrom(start, adjacency, visited, boundary.size());
+    }
+
+    private boolean traverseFrom(Point current, java.util.HashMap<Point, java.util.ArrayList<Point>> adjacency,
+                                java.util.HashSet<Point> visited, int expectedSize) {
+        visited.add(current);
+
+        if (visited.size() >= expectedSize) {
+            return true; // Successfully visited all unique points
+        }
+
+        java.util.ArrayList<Point> neighbors = adjacency.get(current);
+        if (neighbors == null) return false;
+
+        for (Point neighbor : neighbors) {
+            if (!visited.contains(neighbor)) {
+                if (traverseFrom(neighbor, adjacency, visited, expectedSize)) {
+                    return true;
+                }
+            }
+        }
+
+        return visited.size() >= expectedSize;
     }
 
     // Helper class to store chokepoint contact information
@@ -2309,6 +2462,18 @@ public class ZKTerrainAnalyzer {
                         tracingStopFlag = false;
                     }
                 }
+            }
+        }
+
+        // Explicitly add the final closing segment if the contour has points
+        // The tracing algorithm implicitly closes but doesn't store the final segment
+        if (contourPoints.length() > 0) {
+            Point firstPoint = contourPoints.getPoint(0);
+            Point lastPoint = contourPoints.getPoint(contourPoints.length() - 1);
+
+            // Only add if the contour isn't already explicitly closed
+            if (!firstPoint.equals(lastPoint)) {
+                contourPoints.addPoint(firstPoint);
             }
         }
 

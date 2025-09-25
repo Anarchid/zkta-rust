@@ -13,7 +13,10 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Map;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class ZKTAWindow {
 
@@ -83,6 +86,16 @@ public class ZKTAWindow {
         }
 
         public static void main(String[] args) {
+
+            // Check for headless/debug mode
+            boolean headless = false;
+            for (String arg : args) {
+                if (arg.equals("--headless") || arg.equals("--debug") || arg.equals("-d")) {
+                    headless = true;
+                    System.out.println("Running in headless mode (no GUI window)");
+                    break;
+                }
+            }
 
             BufferedImage img;
             try {
@@ -237,40 +250,62 @@ public class ZKTAWindow {
                     float saturation = 0.7f + colorRandom.nextFloat() * 0.3f; // 70-100% saturation
                     float brightness = 0.8f + colorRandom.nextFloat() * 0.2f; // 80-100% brightness
                     Color regionColor = Color.getHSBColor(hue, saturation, brightness);
-                    bg.setColor(regionColor);
 
                     Point centroid = region.getCenter();
                     int nudgePixels = 3;
 
+                    // Create nudged polygon for drawing
+                    int[] xPoints = new int[region.polygon.size()];
+                    int[] yPoints = new int[region.polygon.size()];
+
                     for (int i = 0; i < region.polygon.size(); i++) {
                         Point current = region.polygon.get(i);
-                        Point next = region.polygon.get((i + 1) % region.polygon.size());
 
-                        // Nudge current point toward centroid
-                        int dx1 = centroid.x - current.x;
-                        int dy1 = centroid.y - current.y;
-                        double dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-                        if (dist1 > 0) {
-                            dx1 = (int) (nudgePixels * dx1 / dist1);
-                            dy1 = (int) (nudgePixels * dy1 / dist1);
+                        // Nudge point toward centroid
+                        int dx = centroid.x - current.x;
+                        int dy = centroid.y - current.y;
+                        double dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > 0) {
+                            dx = (int) (nudgePixels * dx / dist);
+                            dy = (int) (nudgePixels * dy / dist);
                         }
-                        Point nudgedCurrent = new Point(current.x + dx1, current.y + dy1);
 
-                        // Nudge next point toward centroid
-                        int dx2 = centroid.x - next.x;
-                        int dy2 = centroid.y - next.y;
-                        double dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-                        if (dist2 > 0) {
-                            dx2 = (int) (nudgePixels * dx2 / dist2);
-                            dy2 = (int) (nudgePixels * dy2 / dist2);
-                        }
-                        Point nudgedNext = new Point(next.x + dx2, next.y + dy2);
-
-                        bg.drawLine(nudgedCurrent.x, nudgedCurrent.y, nudgedNext.x, nudgedNext.y);
+                        xPoints[i] = current.x + dx;
+                        yPoints[i] = current.y + dy;
                     }
+
+                    if (region.isClosed) {
+                        // Draw filled polygon with 25% opacity for closed regions
+                        Color fillColor = new Color(regionColor.getRed(), regionColor.getGreen(),
+                                                   regionColor.getBlue(), 64); // 64/255 = ~25% opacity
+                        g2d.setColor(fillColor);
+                        g2d.fillPolygon(xPoints, yPoints, region.polygon.size());
+
+                        // Draw solid boundary
+                        g2d.setColor(regionColor);
+                        g2d.setStroke(new BasicStroke(1.0f)); // Solid line
+                        g2d.drawPolygon(xPoints, yPoints, region.polygon.size());
+                    } else {
+                        // Draw dashed boundary for open regions
+                        g2d.setColor(regionColor);
+                        float[] dashPattern = {5.0f, 3.0f}; // 5 pixel dash, 3 pixel gap
+                        g2d.setStroke(new BasicStroke(1.0f, BasicStroke.CAP_BUTT,
+                                                     BasicStroke.JOIN_MITER, 10.0f, dashPattern, 0.0f));
+
+                        // Draw the polyline segments
+                        for (int i = 0; i < region.polygon.size() - 1; i++) {
+                            g2d.drawLine(xPoints[i], yPoints[i], xPoints[i + 1], yPoints[i + 1]);
+                        }
+                        // Don't automatically close open polygons
+                    }
+
                     boundariesDrawn++;
                 }
             }
+
+            // Reset stroke to solid for subsequent drawing
+            g2d.setStroke(new BasicStroke(1.0f));
+
             System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
             bg.setColor(Color.YELLOW);
@@ -320,13 +355,133 @@ public class ZKTAWindow {
                 e.printStackTrace();
             }
 
+            // Export JSON data
+            exportToJSON(zkta);
 
-            JFrame frame = new JFrame();
-            ImageIcon icon = new ImageIcon(img);
-            JLabel label = new JLabel(icon);
-            frame.add(label);
-            frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-            frame.pack();
-            frame.setVisible(true);
+            // Only show window if not in headless mode
+            if (!headless) {
+                JFrame frame = new JFrame();
+                ImageIcon icon = new ImageIcon(img);
+                JLabel label = new JLabel(icon);
+                frame.add(label);
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                frame.pack();
+                frame.setVisible(true);
+            } else {
+                System.out.println("Analysis complete. Output saved to result.png and result.json");
+            }
+    }
+
+    private static void exportToJSON(ZKTerrainAnalyzer zkta) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            Map<String, Object> data = new HashMap<>();
+
+            // Export regions
+            ArrayList<Map<String, Object>> regions = new ArrayList<>();
+            ArrayList<Region> regionList = zkta.getRegionList();
+            for (Region region : regionList) {
+                Map<String, Object> regionData = new HashMap<>();
+                regionData.put("id", region.id);
+
+                Map<String, Integer> center = new HashMap<>();
+                center.put("x", region.getCenter().x);
+                center.put("y", region.getCenter().y);
+                regionData.put("center", center);
+
+                regionData.put("radius", region.getRadius());
+                regionData.put("isClosed", region.isClosed);
+
+                // Export polygon points
+                ArrayList<Map<String, Integer>> polygon = new ArrayList<>();
+                if (region.polygon != null) {
+                    for (Point p : region.polygon) {
+                        Map<String, Integer> point = new HashMap<>();
+                        point.put("x", p.x);
+                        point.put("y", p.y);
+                        polygon.add(point);
+                    }
+                }
+                regionData.put("polygon", polygon);
+
+                // Export connected chokepoint indices
+                ArrayList<Integer> chokepointIndices = new ArrayList<>();
+                RegionGraph regionsGraph = zkta.getRegions();
+                int cpIndex = 0;
+                for (Node cpNode : regionsGraph.chokepointNodes) {
+                    if (region.chokepoints.contains(cpNode)) {
+                        chokepointIndices.add(cpIndex);
+                    }
+                    cpIndex++;
+                }
+                regionData.put("chokepointNodes", chokepointIndices);
+
+                regions.add(regionData);
+            }
+            data.put("regions", regions);
+
+            // Export chokepoints
+            ArrayList<Map<String, Object>> chokepoints = new ArrayList<>();
+            RegionGraph regionsGraph = zkta.getRegions();
+            for (Chokepoint cp : regionsGraph.chokepoints) {
+                Map<String, Object> chokepointData = new HashMap<>();
+                chokepointData.put("id", cp.id);
+
+                Map<String, Integer> position = new HashMap<>();
+                position.put("x", cp.node.position.x);
+                position.put("y", cp.node.position.y);
+                chokepointData.put("position", position);
+
+                chokepointData.put("radius", cp.node.radius);
+
+                // Export crossing points
+                ArrayList<Map<String, Integer>> crossingPoints = new ArrayList<>();
+                if (cp.crossingPoints != null) {
+                    for (Point p : cp.crossingPoints) {
+                        Map<String, Integer> point = new HashMap<>();
+                        point.put("x", p.x);
+                        point.put("y", p.y);
+                        crossingPoints.add(point);
+                    }
+                }
+                chokepointData.put("crossingPoints", crossingPoints);
+
+                // Export obstacle IDs
+                ArrayList<Integer> obstacleIds = new ArrayList<>();
+                if (cp.obstacleIds != null) {
+                    for (Integer obstacleId : cp.obstacleIds) {
+                        obstacleIds.add(obstacleId);
+                    }
+                }
+                chokepointData.put("obstacleIds", obstacleIds);
+
+                // Export connected region indices
+                ArrayList<Integer> regionIndices = new ArrayList<>();
+                int regIndex = 0;
+                for (Node regNode : regionsGraph.regionNodes) {
+                    boolean connected = false;
+                    for (Node neighbor : cp.node.neighbours) {
+                        if (neighbor == regNode) {
+                            connected = true;
+                            break;
+                        }
+                    }
+                    if (connected) {
+                        regionIndices.add(regIndex);
+                    }
+                    regIndex++;
+                }
+                chokepointData.put("regionNodes", regionIndices);
+
+                chokepoints.add(chokepointData);
+            }
+            data.put("chokepoints", chokepoints);
+
+            // Write to file
+            mapper.writerWithDefaultPrettyPrinter().writeValue(new File("result.json"), data);
+            System.out.println("Exported data to result.json");
+        } catch (IOException e) {
+            System.err.println("Failed to write JSON file: " + e.getMessage());
+        }
     }
 }
