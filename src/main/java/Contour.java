@@ -50,4 +50,20 @@ public class Contour {
     int length(){
         return this.points.size();
     }
+
+    // Calculate polygon area using shoelace formula
+    public double getArea() {
+        if (points.size() < 3) return 0.0;
+
+        double area = 0.0;
+        int n = points.size();
+
+        for (int i = 0; i < n; i++) {
+            Point current = points.get(i);
+            Point next = points.get((i + 1) % n);
+            area += (current.x * next.y - next.x * current.y);
+        }
+
+        return Math.abs(area) / 2.0;
+    }
 }

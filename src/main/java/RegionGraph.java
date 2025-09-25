@@ -7,11 +7,13 @@ public class RegionGraph {
     public ArrayList<Node> nodes;
     public HashSet<Node> regionNodes;
     public HashSet<Node> chokepointNodes;
+    public ArrayList<Chokepoint> chokepoints;
 
     RegionGraph(){
         this.regionNodes = new HashSet<>();
         this.chokepointNodes = new HashSet<>();
         this.nodes = new ArrayList<>();
+        this.chokepoints = new ArrayList<>();
     }
 
     RegionGraph(Collection nodes){
