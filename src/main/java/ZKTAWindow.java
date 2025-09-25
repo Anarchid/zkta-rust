@@ -195,6 +195,13 @@ public class ZKTAWindow {
                 chokepointNum++;
             }
 
+            // Draw map edge contact points in magenta
+            bg.setColor(Color.MAGENTA);
+            ArrayList<ZKTerrainAnalyzer.MapEdgeContact> mapContacts = zkta.getMapEdgeContacts();
+            for (ZKTerrainAnalyzer.MapEdgeContact contact : mapContacts) {
+                bg.fillOval(contact.contactPoint.x - 3, contact.contactPoint.y - 3, 6, 6);
+            }
+
             // Draw inscribed circles for regions with low-opacity teal
             Graphics2D g2d = (Graphics2D) bg;
             g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.2f)); // 20% opacity
@@ -502,6 +509,37 @@ public class ZKTAWindow {
                 chokepoints.add(chokepointData);
             }
             data.put("chokepoints", chokepoints);
+
+            // Export map edge contacts
+            ArrayList<Map<String, Object>> mapEdgeContacts = new ArrayList<>();
+            for (ZKTerrainAnalyzer.MapEdgeContact contact : zkta.getMapEdgeContacts()) {
+                Map<String, Object> contactData = new HashMap<>();
+
+                // Contact point
+                Map<String, Integer> contactPoint = new HashMap<>();
+                contactPoint.put("x", contact.contactPoint.x);
+                contactPoint.put("y", contact.contactPoint.y);
+                contactData.put("contactPoint", contactPoint);
+
+                // Map edge
+                contactData.put("edge", contact.edge.toString());
+
+                // Type and related entity
+                if (contact.isObstacle) {
+                    contactData.put("type", "obstacle");
+                    contactData.put("obstacleId", contact.obstacleId);
+                } else if (contact.isChokepoint) {
+                    contactData.put("type", "chokepoint");
+                    Map<String, Integer> chokepointPosition = new HashMap<>();
+                    chokepointPosition.put("x", contact.chokepointNode.position.x);
+                    chokepointPosition.put("y", contact.chokepointNode.position.y);
+                    contactData.put("chokepointPosition", chokepointPosition);
+                    contactData.put("chokepointRadius", contact.chokepointNode.radius);
+                }
+
+                mapEdgeContacts.add(contactData);
+            }
+            data.put("mapEdgeContacts", mapEdgeContacts);
 
             // Write to file
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File("result.json"), data);

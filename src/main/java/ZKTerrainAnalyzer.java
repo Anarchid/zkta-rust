@@ -27,6 +27,7 @@ public class ZKTerrainAnalyzer {
     RegionGraph regions;
     ArrayList<Region> regionList;
     ArrayList<Chokepoint> chokepointList;
+    ArrayList<MapEdgeContact> mapEdgeContacts;
     double v_width;
     double v_height;
     double radius;
@@ -52,6 +53,7 @@ public class ZKTerrainAnalyzer {
         jaggedSegments = new ArrayList<>();
         regionList = new ArrayList<>();
         chokepointList = new ArrayList<>();
+        mapEdgeContacts = new ArrayList<>();
         fullContours = traceContours();
         simplifiedContours = simplifyContours();
         voronoid = generateVoronoi((ArrayList<Contour>)simplifiedContours.clone());
@@ -71,6 +73,9 @@ public class ZKTerrainAnalyzer {
 
         // Instead, split obstacle segments at chokepoint contact points
         splitObstacleSegmentsAtChokepointContacts(regions);
+
+        // Detect map edge contacts for obstacles and chokepoints
+        detectMapEdgeContacts();
 
         // Build region boundaries from chokepoint contacts
         buildRegionBoundariesFromChokepoints(regions);
@@ -101,6 +106,10 @@ public class ZKTerrainAnalyzer {
 
     public ArrayList<JaggedSegment> getJaggedSegments(){
         return jaggedSegments;
+    }
+
+    public ArrayList<MapEdgeContact> getMapEdgeContacts(){
+        return mapEdgeContacts;
     }
 
     public Point[] getChokepointSegments(Node chokepoint){
@@ -2137,6 +2146,129 @@ public class ZKTerrainAnalyzer {
             this.contactPoint = contactPoint;
             this.obstacleId = obstacleId;
         }
+    }
+
+    // Map edge enumeration
+    public enum MapEdge {
+        TOP, BOTTOM, LEFT, RIGHT
+    }
+
+    // Helper class to store map edge contact information
+    public static class MapEdgeContact {
+        public Point contactPoint;
+        public MapEdge edge;
+        public Integer obstacleId;
+        public Node chokepointNode;
+        public boolean isObstacle;
+        public boolean isChokepoint;
+
+        // For obstacle contacts
+        public MapEdgeContact(Point contactPoint, MapEdge edge, Integer obstacleId) {
+            this.contactPoint = contactPoint;
+            this.edge = edge;
+            this.obstacleId = obstacleId;
+            this.isObstacle = true;
+            this.isChokepoint = false;
+        }
+
+        // For chokepoint contacts
+        public MapEdgeContact(Point contactPoint, MapEdge edge, Node chokepointNode) {
+            this.contactPoint = contactPoint;
+            this.edge = edge;
+            this.chokepointNode = chokepointNode;
+            this.isObstacle = false;
+            this.isChokepoint = true;
+        }
+    }
+
+    private void detectMapEdgeContacts() {
+        System.out.println("Detecting map edge contacts...");
+        mapEdgeContacts.clear();
+
+        // Define map edges as line segments
+        Point[] topEdge = {new Point(0, 0), new Point(width-1, 0)};
+        Point[] bottomEdge = {new Point(0, height-1), new Point(width-1, height-1)};
+        Point[] leftEdge = {new Point(0, 0), new Point(0, height-1)};
+        Point[] rightEdge = {new Point(width-1, 0), new Point(width-1, height-1)};
+
+        // Check obstacle segments against map edges
+        detectObstacleMapEdgeContacts(topEdge, MapEdge.TOP);
+        detectObstacleMapEdgeContacts(bottomEdge, MapEdge.BOTTOM);
+        detectObstacleMapEdgeContacts(leftEdge, MapEdge.LEFT);
+        detectObstacleMapEdgeContacts(rightEdge, MapEdge.RIGHT);
+
+        // Check chokepoint crossing segments against map edges
+        detectChokepointMapEdgeContacts(topEdge, MapEdge.TOP);
+        detectChokepointMapEdgeContacts(bottomEdge, MapEdge.BOTTOM);
+        detectChokepointMapEdgeContacts(leftEdge, MapEdge.LEFT);
+        detectChokepointMapEdgeContacts(rightEdge, MapEdge.RIGHT);
+
+        System.out.println("Found " + mapEdgeContacts.size() + " map edge contacts");
+    }
+
+    private void detectObstacleMapEdgeContacts(Point[] mapEdge, MapEdge edge) {
+        for (int contourIndex = 0; contourIndex < simplifiedContours.size(); contourIndex++) {
+            Contour contour = simplifiedContours.get(contourIndex);
+            int obstacleId = 1000 + contourIndex;
+
+            // Check each segment of this obstacle contour
+            for (int i = 0; i < contour.length(); i++) {
+                Point p1 = contour.getPoint(i);
+                Point p2 = contour.getPoint((i + 1) % contour.length());
+
+                // Check if this obstacle segment intersects with the map edge
+                Point intersection = getLineIntersection(p1, p2, mapEdge[0], mapEdge[1]);
+                if (intersection != null) {
+                    // Found an intersection - this is a map edge contact
+                    MapEdgeContact contact = new MapEdgeContact(intersection, edge, obstacleId);
+                    mapEdgeContacts.add(contact);
+                    System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + intersection);
+                }
+            }
+        }
+    }
+
+    private void detectChokepointMapEdgeContacts(Point[] mapEdge, MapEdge edge) {
+        if (regions == null || regions.chokepoints == null) return;
+
+        for (Chokepoint chokepoint : regions.chokepoints) {
+            if (chokepoint.crossingPoints != null && chokepoint.crossingPoints.length >= 2) {
+                Point p1 = chokepoint.crossingPoints[0];
+                Point p2 = chokepoint.crossingPoints[1];
+
+                // Check if this chokepoint crossing segment intersects with the map edge
+                Point intersection = getLineIntersection(p1, p2, mapEdge[0], mapEdge[1]);
+                if (intersection != null) {
+                    // Found an intersection - this is a map edge contact
+                    MapEdgeContact contact = new MapEdgeContact(intersection, edge, chokepoint.node);
+                    mapEdgeContacts.add(contact);
+                    System.out.println("  Chokepoint @" + chokepoint.node.position + " contacts " + edge + " edge at " + intersection);
+                }
+            }
+        }
+    }
+
+    // Line intersection algorithm - returns intersection point or null if no intersection
+    private Point getLineIntersection(Point p1, Point p2, Point p3, Point p4) {
+        double x1 = p1.x, y1 = p1.y;
+        double x2 = p2.x, y2 = p2.y;
+        double x3 = p3.x, y3 = p3.y;
+        double x4 = p4.x, y4 = p4.y;
+
+        double denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+        if (Math.abs(denom) < 1e-10) return null; // Lines are parallel
+
+        double t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+        double u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+
+        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+            // Lines intersect within both segments
+            double x = x1 + t * (x2 - x1);
+            double y = y1 + t * (y2 - y1);
+            return new Point((int)Math.round(x), (int)Math.round(y));
+        }
+
+        return null; // No intersection within segments
     }
 
     private void skipUnmarkedVertices(RegionGraph graph) {
