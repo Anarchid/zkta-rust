@@ -69,6 +69,9 @@ public class ZKTerrainAnalyzer {
 
         // Instead, split obstacle segments at chokepoint contact points
         splitObstacleSegmentsAtChokepointContacts(regions);
+
+        // Build region boundaries from chokepoint contacts
+        buildRegionBoundariesFromChokepoints(regions);
     }
 
     public int[][] getLabelMap(){
@@ -1366,6 +1369,228 @@ public class ZKTerrainAnalyzer {
         simplifiedLabelTree = createSimplifiedRTree();
     }
 
+    private void buildRegionBoundariesFromChokepoints(RegionGraph graph) {
+        System.out.println("Building region boundaries from chokepoint contacts...");
+
+        // Clear existing region list
+        regionList.clear();
+
+        int regionId = 0;
+
+        // Iterate through each region
+        for (Node regionNode : graph.regionNodes) {
+            System.out.println("\nBuilding boundary for region @" + regionNode.position + ":");
+
+            // Create Region object
+            Region region = new Region(regionNode, regionId++);
+            ArrayList<Point> boundaryPoints = new ArrayList<>();
+
+            // Find all chokepoints connected to this region
+            ArrayList<Node> connectedChokepoints = new ArrayList<>();
+            for (Node neighbor : regionNode.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    connectedChokepoints.add(neighbor);
+                    region.chokepoints.add(neighbor);
+                }
+            }
+
+            if (connectedChokepoints.isEmpty()) {
+                // Isolated region with no chokepoints - create circular boundary
+                System.out.println("  Isolated region - creating circular boundary");
+                region.setPolygon(createCircularBoundary(regionNode));
+                regionList.add(region);
+                continue;
+            }
+
+            System.out.println("  Found " + connectedChokepoints.size() + " connected chokepoints");
+
+            // Group chokepoint contacts by obstacle ID
+            HashMap<Integer, ArrayList<ChokepointContact>> obstacleContacts = new HashMap<>();
+
+            for (Node chokepointNode : connectedChokepoints) {
+                // Find the Chokepoint object for this node
+                Chokepoint chokepoint = null;
+                for (Chokepoint cp : graph.chokepoints) {
+                    if (cp.node == chokepointNode) {
+                        chokepoint = cp;
+                        break;
+                    }
+                }
+
+                if (chokepoint != null && chokepoint.crossingPoints != null) {
+                    // Add both contact points to the obstacle map
+                    for (int i = 0; i < chokepoint.crossingPoints.length; i++) {
+                        Integer obstacleId = chokepoint.obstacleIds[i];
+                        Point contactPoint = chokepoint.crossingPoints[i];
+
+                        if (!obstacleContacts.containsKey(obstacleId)) {
+                            obstacleContacts.put(obstacleId, new ArrayList<>());
+                        }
+
+                        obstacleContacts.get(obstacleId).add(
+                            new ChokepointContact(chokepointNode, contactPoint, obstacleId)
+                        );
+                    }
+                }
+            }
+
+            // Track which segments we've already added to avoid duplicates
+            HashSet<String> addedSegments = new HashSet<>();
+
+            // For each obstacle that this region touches
+            for (Map.Entry<Integer, ArrayList<ChokepointContact>> entry : obstacleContacts.entrySet()) {
+                Integer obstacleId = entry.getKey();
+                ArrayList<ChokepointContact> contacts = entry.getValue();
+
+                if (contacts.size() < 2) {
+                    System.out.println("  WARNING: Obstacle " + obstacleId + " has only " +
+                                     contacts.size() + " contact point(s), skipping");
+                    continue;
+                }
+
+                System.out.println("  Processing obstacle " + obstacleId + " with " +
+                                 contacts.size() + " contact points");
+
+                // Find the contour for this obstacle
+                Contour obstacleContour = null;
+                int contourIndex = -1;
+
+                // Map obstacle IDs to contour indices
+                if (obstacleId >= 1000) {
+                    // Simplified contour obstacle IDs start at 1000
+                    contourIndex = obstacleId - 1000;
+                    if (contourIndex < simplifiedContours.size()) {
+                        obstacleContour = simplifiedContours.get(contourIndex);
+                    }
+                } else if (obstacleId < 4) {
+                    // Map boundary IDs (0-3) - these don't have contours
+                    System.out.println("    Skipping boundary obstacle " + obstacleId);
+                    continue;
+                }
+
+                if (obstacleContour == null) {
+                    System.out.println("    WARNING: Could not find contour for obstacle " + obstacleId);
+                    continue;
+                }
+
+                // For each pair of contact points on this obstacle
+                for (int i = 0; i < contacts.size(); i++) {
+                    for (int j = i + 1; j < contacts.size(); j++) {
+                        ChokepointContact contact1 = contacts.get(i);
+                        ChokepointContact contact2 = contacts.get(j);
+
+                        // Find the shortest path along the obstacle boundary
+                        ArrayList<Point> pathSegment = findShortestPathAlongContour(
+                            obstacleContour, contact1.contactPoint, contact2.contactPoint, addedSegments
+                        );
+
+                        if (pathSegment != null && !pathSegment.isEmpty()) {
+                            boundaryPoints.addAll(pathSegment);
+                            System.out.println("    Added path from " + contact1.contactPoint +
+                                             " to " + contact2.contactPoint +
+                                             " (" + pathSegment.size() + " points)");
+                        }
+                    }
+                }
+            }
+
+            // Set the boundary polygon for the region
+            if (!boundaryPoints.isEmpty()) {
+                // Sort points to form a proper polygon
+                ArrayList<Point> sortedBoundary = sortBoundaryPoints(regionNode.position, boundaryPoints);
+                region.setPolygon(sortedBoundary);
+                System.out.println("  Generated region boundary with " + sortedBoundary.size() + " points");
+            } else {
+                // Fallback to circular boundary if no valid path found
+                System.out.println("  No valid boundary paths found - using circular fallback");
+                region.setPolygon(createCircularBoundary(regionNode));
+            }
+
+            regionList.add(region);
+        }
+
+        System.out.println("\nGenerated boundaries for " + regionList.size() + " regions");
+    }
+
+    private ArrayList<Point> findShortestPathAlongContour(
+            Contour contour, Point start, Point end, HashSet<String> addedSegments) {
+
+        ArrayList<Point> path = new ArrayList<>();
+
+        // Find indices of start and end points in the contour
+        int startIndex = -1;
+        int endIndex = -1;
+
+        // Check if points are vertices or need to find nearest segments
+        for (int i = 0; i < contour.points.size(); i++) {
+            Point p = contour.points.get(i);
+            if (p.equals(start)) {
+                startIndex = i;
+            }
+            if (p.equals(end)) {
+                endIndex = i;
+            }
+        }
+
+        if (startIndex == -1 || endIndex == -1) {
+            // Points are not vertices, find nearest segments
+            System.out.println("      WARNING: Contact points not found as vertices in contour");
+            return path;
+        }
+
+        // Calculate both possible paths (clockwise and counter-clockwise)
+        ArrayList<Point> pathCW = new ArrayList<>();
+        ArrayList<Point> pathCCW = new ArrayList<>();
+
+        // Clockwise path
+        int current = startIndex;
+        while (current != endIndex) {
+            pathCW.add(contour.points.get(current));
+            current = (current + 1) % contour.points.size();
+        }
+        pathCW.add(contour.points.get(endIndex));
+
+        // Counter-clockwise path
+        current = startIndex;
+        while (current != endIndex) {
+            pathCCW.add(contour.points.get(current));
+            current = (current - 1 + contour.points.size()) % contour.points.size();
+        }
+        pathCCW.add(contour.points.get(endIndex));
+
+        // Choose the shorter path
+        ArrayList<Point> shortestPath = pathCW.size() <= pathCCW.size() ? pathCW : pathCCW;
+
+        // Mark segments as added
+        for (int i = 0; i < shortestPath.size() - 1; i++) {
+            Point p1 = shortestPath.get(i);
+            Point p2 = shortestPath.get(i + 1);
+            String segmentKey = createSegmentKey(p1, p2);
+            addedSegments.add(segmentKey);
+        }
+
+        return shortestPath;
+    }
+
+    private String createSegmentKey(Point p1, Point p2) {
+        // Create a unique key for a segment (order-independent)
+        Point first = (p1.x < p2.x || (p1.x == p2.x && p1.y < p2.y)) ? p1 : p2;
+        Point second = (first == p1) ? p2 : p1;
+        return first.x + "," + first.y + "-" + second.x + "," + second.y;
+    }
+
+    // Helper class to store chokepoint contact information
+    private static class ChokepointContact {
+        Node chokepointNode;
+        Point contactPoint;
+        Integer obstacleId;
+
+        ChokepointContact(Node chokepointNode, Point contactPoint, Integer obstacleId) {
+            this.chokepointNode = chokepointNode;
+            this.contactPoint = contactPoint;
+            this.obstacleId = obstacleId;
+        }
+    }
 
     private void skipUnmarkedVertices(RegionGraph graph) {
         System.out.println("Skipping through unmarked vertices to connect marked nodes directly...");
