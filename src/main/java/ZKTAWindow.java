@@ -226,7 +226,52 @@ public class ZKTAWindow {
             }
             System.out.println("Drew " + segmentsDrawn + " chokepoint segments out of " + r.chokepointNodes.size() + " chokepoints");
 
-            // Region polygons disabled for now - working on chokepoint segments
+            // Draw traced region boundaries (nudged toward centroid for visibility)
+            int boundariesDrawn = 0;
+            java.util.Random colorRandom = new java.util.Random(42); // Fixed seed for consistent colors
+
+            for (Region region : zkta.getRegionList()) {
+                if (region.polygon != null && region.polygon.size() >= 3) {
+                    // Generate a random bright color for this region
+                    float hue = colorRandom.nextFloat();
+                    float saturation = 0.7f + colorRandom.nextFloat() * 0.3f; // 70-100% saturation
+                    float brightness = 0.8f + colorRandom.nextFloat() * 0.2f; // 80-100% brightness
+                    Color regionColor = Color.getHSBColor(hue, saturation, brightness);
+                    bg.setColor(regionColor);
+
+                    Point centroid = region.getCenter();
+                    int nudgePixels = 3;
+
+                    for (int i = 0; i < region.polygon.size(); i++) {
+                        Point current = region.polygon.get(i);
+                        Point next = region.polygon.get((i + 1) % region.polygon.size());
+
+                        // Nudge current point toward centroid
+                        int dx1 = centroid.x - current.x;
+                        int dy1 = centroid.y - current.y;
+                        double dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                        if (dist1 > 0) {
+                            dx1 = (int) (nudgePixels * dx1 / dist1);
+                            dy1 = (int) (nudgePixels * dy1 / dist1);
+                        }
+                        Point nudgedCurrent = new Point(current.x + dx1, current.y + dy1);
+
+                        // Nudge next point toward centroid
+                        int dx2 = centroid.x - next.x;
+                        int dy2 = centroid.y - next.y;
+                        double dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                        if (dist2 > 0) {
+                            dx2 = (int) (nudgePixels * dx2 / dist2);
+                            dy2 = (int) (nudgePixels * dy2 / dist2);
+                        }
+                        Point nudgedNext = new Point(next.x + dx2, next.y + dy2);
+
+                        bg.drawLine(nudgedCurrent.x, nudgedCurrent.y, nudgedNext.x, nudgedNext.y);
+                    }
+                    boundariesDrawn++;
+                }
+            }
+            System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
             bg.setColor(Color.YELLOW);
             for(int i = 0; i < simple.size();i++){

@@ -3,11 +3,26 @@ import java.util.Collections;
 
 public class Contour {
     ArrayList<Point> points;
+    ArrayList<ChokepointContact> chokepointContacts; // Chokepoints that touch this contour
+
+    public static class ChokepointContact {
+        public Node chokepoint;
+        public Point contactPoint;
+        public int segmentIndex; // Which segment of the contour contains this contact
+
+        public ChokepointContact(Node chokepoint, Point contactPoint, int segmentIndex) {
+            this.chokepoint = chokepoint;
+            this.contactPoint = contactPoint;
+            this.segmentIndex = segmentIndex;
+        }
+    }
     Contour(){
         this.points = new ArrayList<Point>();
+        this.chokepointContacts = new ArrayList<>();
     }
     Contour(ArrayList<Point>p){
         this.points = p;
+        this.chokepointContacts = new ArrayList<>();
     }
     Contour(Point[] pts){
         this();
@@ -65,5 +80,22 @@ public class Contour {
         }
 
         return Math.abs(area) / 2.0;
+    }
+
+    // Add a chokepoint contact to this contour
+    public void addChokepointContact(Node chokepoint, Point contactPoint, int segmentIndex) {
+        chokepointContacts.add(new ChokepointContact(chokepoint, contactPoint, segmentIndex));
+    }
+
+    // Get all chokepoints that touch this contour
+    public ArrayList<ChokepointContact> getChokepointContacts() {
+        return chokepointContacts;
+    }
+
+    // Find chokepoint contacts sorted by their position along the contour
+    public ArrayList<ChokepointContact> getOrderedChokepointContacts() {
+        ArrayList<ChokepointContact> ordered = new ArrayList<>(chokepointContacts);
+        ordered.sort((a, b) -> Integer.compare(a.segmentIndex, b.segmentIndex));
+        return ordered;
     }
 }

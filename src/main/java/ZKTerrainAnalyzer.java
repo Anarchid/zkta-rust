@@ -65,7 +65,10 @@ public class ZKTerrainAnalyzer {
         simplifiedLabelTree = createSimplifiedRTree();
         // Recalculate radii using the simplified geometry
         calculateNodeRadii(regions);
-        extractRegionPolygons(regions);
+        // extractRegionPolygons(regions);  // Disabled for now - WIP region detection
+
+        // Instead, split obstacle segments at chokepoint contact points
+        splitObstacleSegmentsAtChokepointContacts(regions);
     }
 
     public int[][] getLabelMap(){
@@ -135,15 +138,14 @@ public class ZKTerrainAnalyzer {
 
         for(int contourIndex = 0; contourIndex < currentSimplified.size(); contourIndex++){
             Contour c = currentSimplified.get(contourIndex);
-            System.out.println("DEBUG: Contour " + contourIndex + " has " + c.points.size() + " points, starts at segment ID " + i);
+            // Use contour index + offset as obstacle ID (offset by 1000 to distinguish from map boundaries)
+            int obstacleId = 1000 + contourIndex;
+            System.out.println("DEBUG: Contour " + contourIndex + " (obstacle ID " + obstacleId + ") has " + c.points.size() + " points");
             for (int j = 1; j < c.points.size(); j++){
                 Point p1 = c.points.get(j-1);
                 Point p2 = c.points.get(j);
-                simplifiedTree = simplifiedTree.add(i, Geometries.line(p1.x, p1.y, p2.x, p2.y));
-                if (i == 56) {
-                    System.out.println("DEBUG: Obstacle ID 56 is in contour " + contourIndex + ", segment from " + p1 + " to " + p2);
-                }
-                i++;
+                simplifiedTree = simplifiedTree.add(obstacleId, Geometries.line(p1.x, p1.y, p2.x, p2.y));
+                i++; // Still count segments for debug output
             }
         }
         System.out.println("Generated Simplified RTree with " + i + " line segments (" +
@@ -501,9 +503,12 @@ public class ZKTerrainAnalyzer {
     private void extractRegionPolygons(RegionGraph graph) {
         System.out.println("Starting region polygon extraction...");
 
-        // Step 1: Find chokepoint crossing points using R-tree and create Chokepoint objects
+        // Step 1: Find chokepoint crossing points and build reverse lookup in contours
         HashMap<Node, Point[]> chokepointCrossings = new HashMap<>();
         graph.chokepoints.clear(); // Clear existing chokepoints
+
+        // First, populate chokepoint contacts in contours
+        populateChokepointContacts();
 
         int chokepointId = 0;
         for (Node chokepointNode : graph.chokepointNodes) {
@@ -552,9 +557,9 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        // Step 4: Generate region boundary polygons
-        System.out.println("Generating region boundary polygons...");
-        generateRegionPolygons(graph, chokepointCrossings);
+        // Step 4: Generate region boundary polygons using counterclockwise tracing
+        System.out.println("Tracing region boundary polygons counterclockwise...");
+        traceRegionBoundaries(graph, chokepointCrossings);
 
         // Step 5: Create final data structures
         System.out.println("Creating final region and chokepoint data structures...");
@@ -621,6 +626,392 @@ public class ZKTerrainAnalyzer {
             edges += node.neighbours.size();
         }
         return edges / 2; // Each edge is counted twice
+    }
+
+    private void traceRegionBoundaries(RegionGraph graph, HashMap<Node, Point[]> chokepointCrossings) {
+        // Clear existing region list
+        regionList.clear();
+
+        int regionId = 0;
+        for (Node regionNode : graph.regionNodes) {
+            System.out.println("\nTracing boundary for region @" + regionNode.position + ":");
+
+            // Create Region object
+            Region region = new Region(regionNode, regionId++);
+
+            // Find all chokepoints connected to this region
+            ArrayList<Node> connectedChokepoints = new ArrayList<>();
+            for (Node neighbor : regionNode.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    connectedChokepoints.add(neighbor);
+                }
+            }
+
+            if (connectedChokepoints.isEmpty()) {
+                System.out.println("  Region has no connected chokepoints - isolated region");
+                // Create a simple circular boundary for isolated regions
+                region.setPolygon(createCircularBoundary(regionNode));
+            } else {
+                System.out.println("  Region has " + connectedChokepoints.size() + " connected chokepoints");
+
+                // Start counterclockwise tracing from the first chokepoint
+                Node startChokepoint = connectedChokepoints.get(0);
+                ArrayList<Point> boundaryPoints = traceBoundaryFromChokepoint(regionNode, startChokepoint, chokepointCrossings);
+
+                if (boundaryPoints != null && boundaryPoints.size() >= 3) {
+                    region.setPolygon(boundaryPoints);
+                    System.out.println("  Traced boundary with " + boundaryPoints.size() + " points");
+                } else {
+                    System.out.println("  Failed to trace boundary - using circular fallback");
+                    region.setPolygon(createCircularBoundary(regionNode));
+                }
+            }
+
+            regionList.add(region);
+        }
+    }
+
+    private ArrayList<Point> createCircularBoundary(Node regionNode) {
+        ArrayList<Point> points = new ArrayList<>();
+        double radius = Math.max(20.0, regionNode.radius * 0.6);
+        int numPoints = 12;
+
+        for (int i = 0; i < numPoints; i++) {
+            double angle = (2 * Math.PI * i) / numPoints;
+            int x = (int) (regionNode.position.x + radius * Math.cos(angle));
+            int y = (int) (regionNode.position.y + radius * Math.sin(angle));
+
+            x = Math.max(0, Math.min(width - 1, x));
+            y = Math.max(0, Math.min(height - 1, y));
+
+            points.add(new Point(x, y));
+        }
+        return points;
+    }
+
+    private ArrayList<Point> traceBoundaryFromChokepoint(Node regionNode, Node startChokepoint, HashMap<Node, Point[]> chokepointCrossings) {
+        ArrayList<Point> boundaryPoints = new ArrayList<>();
+
+        // Get the chokepoint crossing points
+        Point[] crossings = chokepointCrossings.get(startChokepoint);
+        if (crossings == null || crossings.length != 2) {
+            return null;
+        }
+
+        System.out.println("    Starting boundary trace from chokepoint @" + startChokepoint.position);
+
+        // Strategy: Build region boundary by alternating between chokepoint segments and obstacle contour portions
+        // 1. Start with the chokepoint segment
+        // 2. Follow obstacle contour to the next chokepoint
+        // 3. Cross that chokepoint segment
+        // 4. Repeat until boundary is closed
+
+        Point currentPoint = crossings[0];
+        Point startPoint = currentPoint;
+        Node currentChokepoint = startChokepoint;
+
+        int maxIterations = 20; // Safety limit on number of chokepoints to visit
+        int iteration = 0;
+
+        while (iteration < maxIterations) {
+            // Add the current chokepoint segment
+            Point[] currentCrossings = chokepointCrossings.get(currentChokepoint);
+            if (currentCrossings == null || currentCrossings.length != 2) {
+                System.out.println("    Invalid crossings for chokepoint @" + currentChokepoint.position);
+                break;
+            }
+
+            // Add both crossing points of this chokepoint
+            boundaryPoints.add(currentCrossings[0]);
+            boundaryPoints.add(currentCrossings[1]);
+
+            System.out.println("    Added chokepoint segment: " + currentCrossings[0] + " -> " + currentCrossings[1]);
+
+            // Find the next chokepoint by following the contour from the second crossing point
+            Node nextChokepoint = findNextChokepointAlongContour(currentCrossings[1], currentChokepoint, regionNode);
+
+            if (nextChokepoint == null) {
+                System.out.println("    Could not find next chokepoint, ending trace");
+                break;
+            }
+
+            if (nextChokepoint == startChokepoint) {
+                System.out.println("    Returned to start chokepoint, boundary complete");
+                break;
+            }
+
+            System.out.println("    Found next chokepoint @" + nextChokepoint.position);
+
+            // Trace along the obstacle contour to the next chokepoint
+            ArrayList<Point> contourPath = traceContourBetweenChokepoints(currentCrossings[1], nextChokepoint, regionNode);
+            if (contourPath != null && contourPath.size() > 1) {
+                // Add contour points (skip first point as it's already added)
+                for (int i = 1; i < contourPath.size(); i++) {
+                    boundaryPoints.add(contourPath.get(i));
+                }
+                System.out.println("    Added " + (contourPath.size() - 1) + " contour points");
+            }
+
+            currentChokepoint = nextChokepoint;
+            iteration++;
+        }
+
+        if (iteration >= maxIterations) {
+            System.out.println("    Trace exceeded maximum iterations, using fallback");
+            return createFallbackTriangle(crossings);
+        }
+
+        System.out.println("    Completed boundary trace with " + boundaryPoints.size() + " points");
+        return boundaryPoints;
+    }
+
+    private ArrayList<Point> createFallbackTriangle(Point[] crossings) {
+        ArrayList<Point> points = new ArrayList<>();
+        points.add(crossings[0]);
+        points.add(crossings[1]);
+        points.add(crossings[0]); // Close the triangle
+        return points;
+    }
+
+    private class ContourSegmentInfo {
+        public int contourIndex;
+        public int segmentIndex;
+        public Contour contour;
+
+        public ContourSegmentInfo(int contourIndex, int segmentIndex, Contour contour) {
+            this.contourIndex = contourIndex;
+            this.segmentIndex = segmentIndex;
+            this.contour = contour;
+        }
+    }
+
+    private ContourSegmentInfo findContourSegment(Point crossingPoint) {
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        for (int contourIndex = 0; contourIndex < contours.size(); contourIndex++) {
+            Contour contour = contours.get(contourIndex);
+
+            for (int segmentIndex = 0; segmentIndex < contour.length() - 1; segmentIndex++) {
+                Point p1 = contour.getPoint(segmentIndex);
+                Point p2 = contour.getPoint(segmentIndex + 1);
+
+                // Check if the crossing point lies on this segment
+                if (isPointOnSegment(crossingPoint, p1, p2, 2.0)) {
+                    return new ContourSegmentInfo(contourIndex, segmentIndex, contour);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private boolean isPointOnSegment(Point point, Point segmentStart, Point segmentEnd, double tolerance) {
+        // Calculate distance from point to line segment
+        double dx = segmentEnd.x - segmentStart.x;
+        double dy = segmentEnd.y - segmentStart.y;
+
+        if (dx == 0 && dy == 0) {
+            return distance(point, segmentStart) <= tolerance;
+        }
+
+        double t = ((point.x - segmentStart.x) * dx + (point.y - segmentStart.y) * dy) / (dx * dx + dy * dy);
+        t = Math.max(0, Math.min(1, t));
+
+        double closestX = segmentStart.x + t * dx;
+        double closestY = segmentStart.y + t * dy;
+
+        double dist = Math.sqrt((point.x - closestX) * (point.x - closestX) + (point.y - closestY) * (point.y - closestY));
+        return dist <= tolerance;
+    }
+
+    private Point getNextContourPoint(ContourSegmentInfo segmentInfo, Node regionNode) {
+        // Move to the next point in the contour (counterclockwise relative to region)
+        int nextIndex = (segmentInfo.segmentIndex + 1) % segmentInfo.contour.length();
+        return segmentInfo.contour.getPoint(nextIndex);
+    }
+
+    private boolean isCloseToPoint(Point p1, Point p2, double tolerance) {
+        return distance(p1, p2) <= tolerance;
+    }
+
+    private boolean isAtChokepointCrossing(Point currentPoint, HashMap<Node, Point[]> chokepointCrossings) {
+        for (Point[] crossings : chokepointCrossings.values()) {
+            if (crossings != null && crossings.length == 2) {
+                if (isCloseToPoint(currentPoint, crossings[0], 3) ||
+                    isCloseToPoint(currentPoint, crossings[1], 3)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private ContourSegmentInfo advanceToNextSegment(ContourSegmentInfo currentInfo) {
+        int nextSegmentIndex = (currentInfo.segmentIndex + 1) % currentInfo.contour.length();
+        return new ContourSegmentInfo(currentInfo.contourIndex, nextSegmentIndex, currentInfo.contour);
+    }
+
+    private void populateChokepointContacts() {
+        System.out.println("Populating chokepoint contacts in contours...");
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        // Clear existing contacts
+        for (Contour contour : contours) {
+            contour.chokepointContacts.clear();
+        }
+
+        int contactsAdded = 0;
+
+        // For each chokepoint, find which contours it touches and add contacts
+        for (Node chokepointNode : regions.chokepointNodes) {
+            CrossingData crossingData = findChokepointCrossingPoints(chokepointNode);
+
+            if (crossingData != null && crossingData.crossingPoints != null) {
+                // Process each crossing point
+                for (Point crossingPoint : crossingData.crossingPoints) {
+                    // Find which contour and segment contains this crossing point
+                    for (int contourIndex = 0; contourIndex < contours.size(); contourIndex++) {
+                        Contour contour = contours.get(contourIndex);
+
+                        for (int segmentIndex = 0; segmentIndex < contour.length() - 1; segmentIndex++) {
+                            Point p1 = contour.getPoint(segmentIndex);
+                            Point p2 = contour.getPoint(segmentIndex + 1);
+
+                            if (isPointOnSegment(crossingPoint, p1, p2, 2.0)) {
+                                contour.addChokepointContact(chokepointNode, crossingPoint, segmentIndex);
+                                contactsAdded++;
+                                System.out.println("  Added contact: Chokepoint @" + chokepointNode.position +
+                                                 " touches contour " + contourIndex + " at " + crossingPoint);
+                                break; // Found the segment, no need to check others in this contour
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        System.out.println("Added " + contactsAdded + " chokepoint contacts to contours");
+
+        // Debug: show contours with multiple chokepoint contacts
+        for (int i = 0; i < contours.size(); i++) {
+            Contour contour = contours.get(i);
+            if (contour.getChokepointContacts().size() > 1) {
+                System.out.println("Contour " + i + " has " + contour.getChokepointContacts().size() + " chokepoint contacts");
+            }
+        }
+    }
+
+    private Node findNextChokepointAlongContour(Point startPoint, Node excludeChokepoint, Node regionNode) {
+        // Find which contour contains the start point
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        for (Contour contour : contours) {
+            // Check if this contour has the start point and multiple chokepoints
+            if (contour.getChokepointContacts().size() > 1) {
+                boolean hasStartPoint = false;
+
+                // Check if start point is on this contour
+                for (int i = 0; i < contour.length() - 1; i++) {
+                    Point p1 = contour.getPoint(i);
+                    Point p2 = contour.getPoint(i + 1);
+                    if (isPointOnSegment(startPoint, p1, p2, 2.0)) {
+                        hasStartPoint = true;
+                        break;
+                    }
+                }
+
+                if (hasStartPoint) {
+                    // Find the next chokepoint on this contour (excluding the current one)
+                    for (Contour.ChokepointContact contact : contour.getOrderedChokepointContacts()) {
+                        if (contact.chokepoint != excludeChokepoint &&
+                            regionNode.neighbours.contains(contact.chokepoint)) {
+                            return contact.chokepoint;
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private ArrayList<Point> traceContourBetweenChokepoints(Point startPoint, Node targetChokepoint, Node regionNode) {
+        ArrayList<Point> path = new ArrayList<>();
+        path.add(startPoint);
+
+        // Find the contour containing both the start point and target chokepoint
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        for (Contour contour : contours) {
+            // Check if this contour contains both points
+            int startSegmentIndex = -1;
+            int targetSegmentIndex = -1;
+            Point targetContactPoint = null;
+
+            // Find start point segment
+            for (int i = 0; i < contour.length() - 1; i++) {
+                Point p1 = contour.getPoint(i);
+                Point p2 = contour.getPoint(i + 1);
+                if (isPointOnSegment(startPoint, p1, p2, 2.0)) {
+                    startSegmentIndex = i;
+                    break;
+                }
+            }
+
+            // Find target chokepoint contact
+            for (Contour.ChokepointContact contact : contour.getChokepointContacts()) {
+                if (contact.chokepoint == targetChokepoint) {
+                    targetSegmentIndex = contact.segmentIndex;
+                    targetContactPoint = contact.contactPoint;
+                    break;
+                }
+            }
+
+            if (startSegmentIndex != -1 && targetSegmentIndex != -1 && targetContactPoint != null) {
+                System.out.println("      Tracing contour from segment " + startSegmentIndex + " to segment " + targetSegmentIndex);
+
+                // Trace along the contour from start to target
+                int currentIndex = startSegmentIndex;
+                int steps = 0;
+                int maxSteps = contour.length(); // Safety limit
+
+                // Determine direction: should we go forward or backward along the contour?
+                // For now, always go forward (counterclockwise)
+                boolean reachedTarget = false;
+
+                while (steps < maxSteps && !reachedTarget) {
+                    // Move to next point in contour
+                    currentIndex = (currentIndex + 1) % contour.length();
+                    Point currentPoint = contour.getPoint(currentIndex);
+                    path.add(currentPoint);
+
+                    // Check if we've reached the target segment
+                    if (currentIndex == targetSegmentIndex ||
+                        (currentIndex == (targetSegmentIndex + 1) % contour.length())) {
+                        // We've reached the target segment, add the exact contact point if different
+                        if (!currentPoint.equals(targetContactPoint) &&
+                            !path.get(path.size() - 1).equals(targetContactPoint)) {
+                            path.add(targetContactPoint);
+                        }
+                        reachedTarget = true;
+                    }
+
+                    steps++;
+                }
+
+                if (!reachedTarget) {
+                    System.out.println("      Warning: Could not reach target along contour, adding direct connection");
+                    path.add(targetContactPoint);
+                }
+
+                System.out.println("      Traced " + (path.size() - 1) + " contour points");
+                return path;
+            }
+        }
+
+        // Fallback: direct connection
+        System.out.println("      Could not find shared contour, using direct connection");
+        return path;
     }
 
     private void generateRegionPolygons(RegionGraph graph, HashMap<Node, Point[]> chokepointCrossings) {
@@ -833,6 +1224,148 @@ public class ZKTerrainAnalyzer {
     private double distance(Point p1, Point p2) {
         return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
     }
+
+    private void splitObstacleSegmentsAtChokepointContacts(RegionGraph graph) {
+        System.out.println("Splitting obstacle segments at chokepoint contact points...");
+
+        // First, clear and populate the chokepoints list with crossing data
+        graph.chokepoints.clear();
+        int chokepointId = 0;
+
+        // Create a map to track which segments need splitting and where
+        HashMap<Integer, ArrayList<Point>> contourSplitPoints = new HashMap<>();
+
+        // For each chokepoint, find its contact points with obstacles
+        for (Node chokepointNode : graph.chokepointNodes) {
+            CrossingData crossingData = findChokepointCrossingPoints(chokepointNode);
+
+            // Create Chokepoint object and store it
+            Chokepoint chokepoint = new Chokepoint(chokepointNode, chokepointId++);
+
+            if (crossingData != null && crossingData.crossingPoints != null) {
+                // Set the crossing data for the chokepoint
+                chokepoint.setCrossingData(crossingData.crossingPoints, crossingData.obstacleIds);
+
+                System.out.println("Chokepoint @" + chokepointNode.position +
+                                 " (r=" + String.format("%.1f", chokepointNode.radius) + ")" +
+                                 " crosses obstacles " + crossingData.obstacleIds[0] + " and " + crossingData.obstacleIds[1] +
+                                 " at: " + crossingData.crossingPoints[0] + " and " + crossingData.crossingPoints[1]);
+
+                // Process each crossing point for segment splitting
+                for (int i = 0; i < crossingData.crossingPoints.length; i++) {
+                    Point crossingPoint = crossingData.crossingPoints[i];
+                    Integer obstacleId = crossingData.obstacleIds[i];
+
+                    // Find which contour and segment this crossing point is on
+                    for (int contourIndex = 0; contourIndex < simplifiedContours.size(); contourIndex++) {
+                        Contour contour = simplifiedContours.get(contourIndex);
+
+                        for (int segmentIndex = 0; segmentIndex < contour.points.size() - 1; segmentIndex++) {
+                            Point p1 = contour.points.get(segmentIndex);
+                            Point p2 = contour.points.get(segmentIndex + 1);
+
+                            // Check if crossing point is on this segment
+                            if (isPointOnSegment(crossingPoint, p1, p2, 2.0)) {
+                                // Check if the crossing point is different from both endpoints
+                                if (!crossingPoint.equals(p1) && !crossingPoint.equals(p2)) {
+                                    // Mark this segment for splitting
+                                    if (!contourSplitPoints.containsKey(contourIndex)) {
+                                        contourSplitPoints.put(contourIndex, new ArrayList<>());
+                                    }
+
+                                    // Add the split point if not already in the list
+                                    boolean alreadyAdded = false;
+                                    for (Point existingPoint : contourSplitPoints.get(contourIndex)) {
+                                        if (existingPoint.equals(crossingPoint)) {
+                                            alreadyAdded = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (!alreadyAdded) {
+                                        contourSplitPoints.get(contourIndex).add(crossingPoint);
+                                        System.out.println("  Will split contour " + contourIndex +
+                                                         " segment [" + segmentIndex + "->" + (segmentIndex+1) + "] " +
+                                                         "at point " + crossingPoint +
+                                                         " (chokepoint @" + chokepointNode.position + ")");
+                                    }
+                                }
+                                break; // Found the segment, no need to check others in this contour
+                            }
+                        }
+                    }
+                }
+            } else {
+                System.out.println("WARNING: No crossing points found for chokepoint @" + chokepointNode.position +
+                                 " (r=" + String.format("%.1f", chokepointNode.radius) + ")");
+            }
+
+            // Add the chokepoint to the graph
+            graph.chokepoints.add(chokepoint);
+        }
+
+        System.out.println("Found crossing points for " + graph.chokepoints.size() + " chokepoints");
+
+        // Now perform the actual splitting
+        int totalSplits = 0;
+        for (Map.Entry<Integer, ArrayList<Point>> entry : contourSplitPoints.entrySet()) {
+            Integer contourIndex = entry.getKey();
+            ArrayList<Point> splitPoints = entry.getValue();
+
+            if (splitPoints.size() > 0) {
+                Contour originalContour = simplifiedContours.get(contourIndex);
+                ArrayList<Point> newPoints = new ArrayList<>();
+
+                // Iterate through original segments
+                for (int i = 0; i < originalContour.points.size() - 1; i++) {
+                    Point p1 = originalContour.points.get(i);
+                    Point p2 = originalContour.points.get(i + 1);
+
+                    // Add the start point
+                    newPoints.add(p1);
+
+                    // Check if any split points are on this segment
+                    ArrayList<Point> segmentSplits = new ArrayList<>();
+                    for (Point splitPoint : splitPoints) {
+                        if (isPointOnSegment(splitPoint, p1, p2, 2.0) &&
+                            !splitPoint.equals(p1) && !splitPoint.equals(p2)) {
+                            segmentSplits.add(splitPoint);
+                        }
+                    }
+
+                    // Sort split points by distance from p1 if there are multiple on same segment
+                    if (segmentSplits.size() > 1) {
+                        segmentSplits.sort((a, b) -> {
+                            double distA = distance(p1, a);
+                            double distB = distance(p1, b);
+                            return Double.compare(distA, distB);
+                        });
+                    }
+
+                    // Add all split points in order
+                    for (Point splitPoint : segmentSplits) {
+                        newPoints.add(splitPoint);
+                        totalSplits++;
+                    }
+                }
+
+                // Add the last point
+                newPoints.add(originalContour.points.get(originalContour.points.size() - 1));
+
+                // Update the contour with new points
+                originalContour.points = newPoints;
+                System.out.println("  Contour " + contourIndex + " updated: " +
+                                 (originalContour.points.size() - splitPoints.size()) +
+                                 " points -> " + originalContour.points.size() + " points");
+            }
+        }
+
+        System.out.println("Split " + totalSplits + " obstacle segments at chokepoint contact points");
+
+        // Rebuild the R-tree with the updated contours
+        simplifiedLabelTree = createSimplifiedRTree();
+    }
+
 
     private void skipUnmarkedVertices(RegionGraph graph) {
         System.out.println("Skipping through unmarked vertices to connect marked nodes directly...");
