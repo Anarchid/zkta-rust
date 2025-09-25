@@ -1135,17 +1135,83 @@ public class ZKTerrainAnalyzer {
         }
     }
 
-    private ArrayList<Point> sortBoundaryPoints(Point center, ArrayList<Point> points) {
-        // Sort points by angle around the region center to create a proper polygon
-        ArrayList<Point> sorted = new ArrayList<>(points);
+    private ArrayList<Point> buildConnectedBoundary(ArrayList<ArrayList<Point>> segments) {
+        if (segments.isEmpty()) {
+            return null;
+        }
 
-        sorted.sort((p1, p2) -> {
-            double angle1 = Math.atan2(p1.y - center.y, p1.x - center.x);
-            double angle2 = Math.atan2(p2.y - center.y, p2.x - center.x);
-            return Double.compare(angle1, angle2);
-        });
+        if (segments.size() == 1) {
+            // Single segment - return as is
+            return segments.get(0);
+        }
 
-        return sorted;
+        ArrayList<Point> connectedBoundary = new ArrayList<>();
+        ArrayList<ArrayList<Point>> remainingSegments = new ArrayList<>(segments);
+
+        // Start with the first segment
+        ArrayList<Point> currentSegment = remainingSegments.remove(0);
+        connectedBoundary.addAll(currentSegment);
+
+        // Try to connect segments
+        while (!remainingSegments.isEmpty()) {
+            // Get the last point of current boundary
+            Point lastPoint = connectedBoundary.get(connectedBoundary.size() - 1);
+
+            // Find a segment that starts with this point
+            ArrayList<Point> nextSegment = null;
+            int nextIndex = -1;
+
+            for (int i = 0; i < remainingSegments.size(); i++) {
+                ArrayList<Point> segment = remainingSegments.get(i);
+                if (!segment.isEmpty()) {
+                    Point segmentStart = segment.get(0);
+                    Point segmentEnd = segment.get(segment.size() - 1);
+
+                    if (segmentStart.equals(lastPoint)) {
+                        // This segment connects forward
+                        nextSegment = segment;
+                        nextIndex = i;
+                        break;
+                    } else if (segmentEnd.equals(lastPoint)) {
+                        // This segment connects in reverse
+                        nextSegment = new ArrayList<>(segment);
+                        Collections.reverse(nextSegment);
+                        nextIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (nextSegment == null) {
+                // Can't connect more segments - check if we closed the loop
+                Point firstPoint = connectedBoundary.get(0);
+                if (lastPoint.equals(firstPoint) || distance(lastPoint, firstPoint) < 5.0) {
+                    // Closed loop achieved
+                    System.out.println("  Built closed boundary with " + connectedBoundary.size() + " points");
+                    return connectedBoundary;
+                }
+
+                // Failed to connect all segments
+                System.out.println("  Failed to connect segments - gap between " + lastPoint +
+                                 " and remaining segments");
+                return null;
+            }
+
+            // Add the next segment (skip the first point as it's already in the boundary)
+            for (int i = 1; i < nextSegment.size(); i++) {
+                connectedBoundary.add(nextSegment.get(i));
+            }
+            remainingSegments.remove(nextIndex);
+        }
+
+        // Check if we have a closed boundary
+        Point firstPoint = connectedBoundary.get(0);
+        Point lastPoint = connectedBoundary.get(connectedBoundary.size() - 1);
+        boolean isClosed = firstPoint.equals(lastPoint) || distance(firstPoint, lastPoint) < 5.0;
+
+        System.out.println("  Built " + (isClosed ? "closed" : "open") +
+                         " boundary with " + connectedBoundary.size() + " points");
+        return connectedBoundary;
     }
 
     private CrossingData findChokepointCrossingPoints(Node chokepoint) {
@@ -1483,6 +1549,9 @@ public class ZKTerrainAnalyzer {
             // Track which segments we've already added to avoid duplicates
             HashSet<String> addedSegments = new HashSet<>();
 
+            // Store path segments separately to preserve connectivity
+            ArrayList<ArrayList<Point>> pathSegments = new ArrayList<>();
+
             // For each obstacle that this region touches
             for (Map.Entry<Integer, ArrayList<ChokepointContact>> entry : obstacleContacts.entrySet()) {
                 Integer obstacleId = entry.getKey();
@@ -1531,7 +1600,7 @@ public class ZKTerrainAnalyzer {
                         );
 
                         if (pathSegment != null && !pathSegment.isEmpty()) {
-                            boundaryPoints.addAll(pathSegment);
+                            pathSegments.add(pathSegment);
                             System.out.println("    Added path from " + contact1.contactPoint +
                                              " to " + contact2.contactPoint +
                                              " (" + pathSegment.size() + " points)");
@@ -1540,20 +1609,51 @@ public class ZKTerrainAnalyzer {
                 }
             }
 
+            // Add chokepoint crossing segments to connect obstacle segments
+            for (Node chokepointNode : connectedChokepoints) {
+                // Find the Chokepoint object for this node
+                Chokepoint chokepoint = null;
+                for (Chokepoint cp : graph.chokepoints) {
+                    if (cp.node == chokepointNode) {
+                        chokepoint = cp;
+                        break;
+                    }
+                }
+
+                if (chokepoint != null && chokepoint.crossingPoints != null && chokepoint.crossingPoints.length >= 2) {
+                    // Add the chokepoint crossing segment
+                    ArrayList<Point> chokepointSegment = new ArrayList<>();
+                    chokepointSegment.add(chokepoint.crossingPoints[0]);
+                    chokepointSegment.add(chokepoint.crossingPoints[1]);
+                    pathSegments.add(chokepointSegment);
+                    System.out.println("    Added chokepoint segment from " +
+                                     chokepoint.crossingPoints[0] + " to " + chokepoint.crossingPoints[1] + " (2 points)");
+                }
+            }
+
+            // Build connected boundary from segments
+            ArrayList<Point> connectedBoundary = buildConnectedBoundary(pathSegments);
+            if (connectedBoundary != null) {
+                boundaryPoints = connectedBoundary;
+            } else {
+                System.out.println("  WARNING: Could not build connected boundary from segments");
+                boundaryPoints.clear();
+            }
+
 
             // Set the boundary polygon for the region
             if (!boundaryPoints.isEmpty()) {
-                // Sort points to form a proper polygon
-                ArrayList<Point> sortedBoundary = sortBoundaryPoints(regionNode.position, boundaryPoints);
-                region.setPolygon(sortedBoundary);
+                // Use boundary points directly - they're already in the correct order
+                // from tracing along obstacle contours
+                region.setPolygon(boundaryPoints);
 
                 // Check if the boundary forms a closed polygon
                 // A boundary is considered closed if consecutive points are connected
                 // (no large gaps between them)
-                boolean isClosed = checkBoundaryConnectivity(sortedBoundary);
+                boolean isClosed = checkBoundaryConnectivity(boundaryPoints);
                 region.isClosed = isClosed;
 
-                System.out.println("  Generated region boundary with " + sortedBoundary.size() +
+                System.out.println("  Generated region boundary with " + boundaryPoints.size() +
                                  " points (" + (isClosed ? "CLOSED" : "OPEN") + ")");
             } else {
                 // No valid boundary paths found - skip this region
