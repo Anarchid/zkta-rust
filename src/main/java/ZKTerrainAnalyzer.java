@@ -2211,7 +2211,7 @@ public class ZKTerrainAnalyzer {
             Contour contour = simplifiedContours.get(contourIndex);
             int obstacleId = 1000 + contourIndex;
 
-            // Check each segment of this obstacle contour
+            // Check each segment of this obstacle contour for intersections
             for (int i = 0; i < contour.length(); i++) {
                 Point p1 = contour.getPoint(i);
                 Point p2 = contour.getPoint((i + 1) % contour.length());
@@ -2222,9 +2222,39 @@ public class ZKTerrainAnalyzer {
                     // Found an intersection - this is a map edge contact
                     MapEdgeContact contact = new MapEdgeContact(intersection, edge, obstacleId);
                     mapEdgeContacts.add(contact);
-                    System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + intersection);
+                    System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + intersection + " (intersection)");
                 }
             }
+
+            // Also check each vertex for proximity to map edges (within 4 pixels)
+            for (int i = 0; i < contour.length(); i++) {
+                Point vertex = contour.getPoint(i);
+                Point nearestOnEdge = getNearestPointOnMapEdge(vertex, edge);
+                double distance = distance(vertex, nearestOnEdge);
+
+                if (distance <= 4.0) {
+                    // Vertex is close to map edge - add as contact at the vertex location
+                    MapEdgeContact contact = new MapEdgeContact(vertex, edge, obstacleId);
+                    mapEdgeContacts.add(contact);
+                    System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + vertex + " (proximity, dist=" + String.format("%.1f", distance) + ")");
+                }
+            }
+        }
+    }
+
+    // Get the nearest point on a map edge to a given point
+    private Point getNearestPointOnMapEdge(Point point, MapEdge edge) {
+        switch (edge) {
+            case TOP:
+                return new Point(Math.max(0, Math.min(width-1, point.x)), 0);
+            case BOTTOM:
+                return new Point(Math.max(0, Math.min(width-1, point.x)), height-1);
+            case LEFT:
+                return new Point(0, Math.max(0, Math.min(height-1, point.y)));
+            case RIGHT:
+                return new Point(width-1, Math.max(0, Math.min(height-1, point.y)));
+            default:
+                return point;
         }
     }
 
