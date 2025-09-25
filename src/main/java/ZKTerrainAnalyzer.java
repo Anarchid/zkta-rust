@@ -54,6 +54,7 @@ public class ZKTerrainAnalyzer {
         calculateNodeRadii(regions);
         identifyRegionsAndChokepoints(regions);
         pruneContainedChokepoints(regions);
+        cleanupSandwichedRegions(regions);
         skipUnmarkedVertices(regions);
         mergeContiguousNodes(regions);
     }
@@ -310,6 +311,103 @@ public class ZKTerrainAnalyzer {
         System.out.println("Final counts after pruning:");
         System.out.println("- Regions: " + graph.regionNodes.size());
         System.out.println("- Chokepoints: " + graph.chokepointNodes.size());
+    }
+
+    private void cleanupSandwichedRegions(RegionGraph graph) {
+        System.out.println("Cleaning up sandwiched regions between chokepoints...");
+
+        ArrayList<Node> regionsToRemove = new ArrayList<>();
+        ArrayList<Node> chokepointsToRemove = new ArrayList<>();
+        int mergedCases = 0;
+
+        for (Node region : graph.regionNodes) {
+            // Check if region has exactly 2 neighbors, both chokepoints
+            if (region.neighbours.size() == 2) {
+                Node neighbor1 = null, neighbor2 = null;
+                boolean bothChokepoints = true;
+
+                for (Node neighbor : region.neighbours) {
+                    if (graph.chokepointNodes.contains(neighbor)) {
+                        if (neighbor1 == null) {
+                            neighbor1 = neighbor;
+                        } else {
+                            neighbor2 = neighbor;
+                        }
+                    } else {
+                        bothChokepoints = false;
+                        break;
+                    }
+                }
+
+                if (bothChokepoints && neighbor1 != null && neighbor2 != null) {
+                    // Check if region is contained within both chokepoints
+                    double dist1 = Math.sqrt(Math.pow(region.position.x - neighbor1.position.x, 2) +
+                                           Math.pow(region.position.y - neighbor1.position.y, 2));
+                    double dist2 = Math.sqrt(Math.pow(region.position.x - neighbor2.position.x, 2) +
+                                           Math.pow(region.position.y - neighbor2.position.y, 2));
+
+                    boolean containedInBoth = (dist1 < neighbor1.radius) &&
+                                            (dist2 < neighbor2.radius);
+
+                    if (containedInBoth) {
+                        System.out.println("Sandwiched region found: Region @" + region.position +
+                                         " (r=" + String.format("%.1f", region.radius) + ")" +
+                                         " between chokepoints @" + neighbor1.position +
+                                         " (r=" + String.format("%.1f", neighbor1.radius) + ")" +
+                                         " and @" + neighbor2.position +
+                                         " (r=" + String.format("%.1f", neighbor2.radius) + ")");
+
+                        // Keep the chokepoint with larger radius, remove the other two
+                        Node chokepointToKeep, chokepointToRemove;
+                        if (neighbor1.radius >= neighbor2.radius) {
+                            chokepointToKeep = neighbor1;
+                            chokepointToRemove = neighbor2;
+                        } else {
+                            chokepointToKeep = neighbor2;
+                            chokepointToRemove = neighbor1;
+                        }
+
+                        System.out.println("Merging into chokepoint @" + chokepointToKeep.position +
+                                         " (r=" + String.format("%.1f", chokepointToKeep.radius) + ")");
+
+                        // Transfer connections from removed nodes to kept chokepoint
+                        for (Node n : chokepointToRemove.neighbours) {
+                            if (n != region) { // Don't connect to the region being removed
+                                n.neighbours.remove(chokepointToRemove);
+                                n.neighbours.add(chokepointToKeep);
+                                chokepointToKeep.neighbours.add(n);
+                            }
+                        }
+
+                        // Remove connections to the nodes being removed
+                        chokepointToKeep.neighbours.remove(region);
+                        chokepointToKeep.neighbours.remove(chokepointToRemove);
+
+                        // Mark nodes for removal
+                        regionsToRemove.add(region);
+                        chokepointsToRemove.add(chokepointToRemove);
+                        mergedCases++;
+                    }
+                }
+            }
+        }
+
+        // Remove all marked nodes from the graph
+        for (Node region : regionsToRemove) {
+            graph.nodes.remove(region);
+            graph.regionNodes.remove(region);
+        }
+        for (Node chokepoint : chokepointsToRemove) {
+            graph.nodes.remove(chokepoint);
+            graph.chokepointNodes.remove(chokepoint);
+        }
+
+        System.out.println("Sandwiched region cleanup complete:");
+        System.out.println("- Cases merged: " + mergedCases);
+        System.out.println("- Regions removed: " + regionsToRemove.size());
+        System.out.println("- Chokepoints removed: " + chokepointsToRemove.size());
+        System.out.println("- Final regions: " + graph.regionNodes.size());
+        System.out.println("- Final chokepoints: " + graph.chokepointNodes.size());
     }
 
     private void skipUnmarkedVertices(RegionGraph graph) {
