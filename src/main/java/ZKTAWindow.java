@@ -136,20 +136,17 @@ public class ZKTAWindow {
 
             int edges = 0;
 
-            for (Edge e : g.edges) {
-                if (e.valid) {
-                    int[] v1 = zkta.coordsFromVoronoi(e.source);
-                    int[] v2 = zkta.coordsFromVoronoi(e.target);
-
-                    if(zkta.pruned.contains(e)){
-                        bg.setColor(Color.DARK_GRAY);
-                    }else{
-                        bg.setColor(Color.LIGHT_GRAY);
-                        //bg.fillOval(v1[0] - 3, v1[1] - 3, 6, 6);
-                        //bg.fillOval(v2[0] - 3, v2[1] - 3, 6, 6);
+            // Draw edges from the FINAL region graph instead of original Voronoi
+            bg.setColor(Color.LIGHT_GRAY);
+            RegionGraph finalGraph = zkta.getRegions();
+            for (Node node : finalGraph.nodes) {
+                for (Node neighbor : node.neighbours) {
+                    // Only draw each edge once
+                    if (node.position.x < neighbor.position.x ||
+                        (node.position.x == neighbor.position.x && node.position.y < neighbor.position.y)) {
+                        bg.drawLine(node.position.x, node.position.y, neighbor.position.x, neighbor.position.y);
+                        edges++;
                     }
-                    edges++;
-                    bg.drawLine(v1[0],v1[1],v2[0],v2[1]);
                 }
             }
             RegionGraph r = zkta.getRegions();
@@ -162,16 +159,28 @@ public class ZKTAWindow {
                 }
             }
 
-            // Draw region seed nodes in turquoise
+            // Draw region seed nodes in turquoise with numbers
             bg.setColor(new Color(64, 224, 208)); // Turquoise color
+            int regionNum = 0;
             for(Node n:r.regionNodes){
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
+                // Draw region number
+                bg.setColor(Color.WHITE);
+                bg.drawString("R" + regionNum, n.position.x + 6, n.position.y - 6);
+                bg.setColor(new Color(64, 224, 208)); // Reset to turquoise
+                regionNum++;
             }
 
-            // Draw chokepoint nodes in red
+            // Draw chokepoint nodes in red with numbers
             bg.setColor(Color.RED);
+            int chokepointNum = 0;
             for(Node n:r.chokepointNodes){
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
+                // Draw chokepoint number
+                bg.setColor(Color.WHITE);
+                bg.drawString("C" + chokepointNum, n.position.x + 6, n.position.y - 6);
+                bg.setColor(Color.RED); // Reset to red
+                chokepointNum++;
             }
 
             // Draw inscribed circles for regions with low-opacity teal

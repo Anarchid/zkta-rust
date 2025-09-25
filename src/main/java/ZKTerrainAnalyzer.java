@@ -55,6 +55,7 @@ public class ZKTerrainAnalyzer {
         identifyRegionsAndChokepoints(regions);
         pruneContainedChokepoints(regions);
         skipUnmarkedVertices(regions);
+        mergeContiguousNodes(regions);
     }
 
     public int[][] getLabelMap(){
@@ -117,25 +118,69 @@ public class ZKTerrainAnalyzer {
 
     private RegionGraph pruneGraph(RegionGraph graph)
     {
-        // First: Remove nodes that are too close to obstacles
-        System.out.println("Pruning nodes too close to obstacles...");
-        int removed = 0;
-        ArrayList<Node> nodesToRemove = new ArrayList<>();
-
-        for (Node n : graph.nodes) {
-            double dist = getDistanceToObstacle(n);
-            if (dist < TOO_CLOSE_TO_OBSTACLE) {
-                nodesToRemove.add(n);
+        // Get the list of all leafs (nodes with only one element in the adjacent list)
+        LinkedList<Node> nodeToPrune = new LinkedList<>();
+        for(Node n:graph.nodes){
+            if(n.neighbours.size() == 1){
+                nodeToPrune.add(n);
             }
         }
 
-        for (Node n : nodesToRemove) {
-            graph.removeNode(n);
-            removed++;
+        System.out.println("Beginning region discovery with "+nodeToPrune.size()+" leaf nodes");
+        int removed = 0;
+
+        // Using leafs as starting points, prune the RegionGraph
+        while (!nodeToPrune.isEmpty()) {
+            // Pop first element
+            Node n0 = nodeToPrune.poll();
+
+            // Keep isolated nodes
+            if (n0.neighbours.isEmpty()) continue;
+
+            System.out.println("Processing node @"+n0.position);
+
+            Node n1 = n0.neighbours.iterator().next();
+
+            // Find distance to nearest obstacle
+            double dist_0 = getDistanceToObstacle(n0);
+            System.out.println("Distance to obstacle: "+dist_0);
+            double dist_1 = 0;
+            boolean deleted = false;
+
+            if(dist_0 < TOO_CLOSE_TO_OBSTACLE){
+                System.out.println("Too close, removing!");
+                removed++;
+                deleted = true;
+                graph.removeNode(n0);
+            } else {
+                dist_1 = getDistanceToObstacle(n1);
+                System.out.println("Parent node distance to obstacle: "+dist_1);
+                // Only remove if significantly closer to obstacle than parent AND parent is not too close
+                if(dist_0 - 0.9 < dist_1 && dist_1 > TOO_CLOSE_TO_OBSTACLE){
+                    System.out.println("Parent is farther from obstacle - removing!");
+                    deleted = true;
+                    removed++;
+                    graph.removeNode(n0);
+                } else {
+                    deleted = false; // Don't remove this node
+                }
+            }
+
+            if(deleted){
+                System.out.println("Parent now has degree "+n1.neighbours.size());
+                if (n1.neighbours.isEmpty() && dist_1 > TOO_CLOSE_TO_OBSTACLE) {
+                    // Isolated node far enough from obstacles
+                    System.out.println("Marked parent as isolated region");
+                } else if (n1.neighbours.size() == 1) {
+                    // Keep pruning if only one child
+                    System.out.println("Queued parent for processing");
+                    nodeToPrune.add(n1);
+                }
+            }
         }
 
-        System.out.println("Removed " + removed + " nodes too close to obstacles");
-        System.out.println("Remaining nodes: " + graph.nodes.size());
+        System.out.println("Total nodes removed during discovery "+removed);
+        System.out.println("Total nodes retained during discovery: "+graph.nodes.size());
 
         return graph;
     }
@@ -270,82 +315,303 @@ public class ZKTerrainAnalyzer {
     private void skipUnmarkedVertices(RegionGraph graph) {
         System.out.println("Skipping through unmarked vertices to connect marked nodes directly...");
 
-        int chainsSkipped = 0;
-        int nodesRemoved = 0;
+        // Find all unmarked nodes
+        HashSet<Node> unmarkedNodes = new HashSet<>();
+        HashSet<Node> markedNodes = new HashSet<>();
 
-        // Find all unmarked nodes (nodes that are neither regions nor chokepoints)
-        ArrayList<Node> unmarkedNodes = new ArrayList<>();
         for (Node n : graph.nodes) {
             if (!graph.regionNodes.contains(n) && !graph.chokepointNodes.contains(n)) {
                 unmarkedNodes.add(n);
+            } else {
+                markedNodes.add(n);
             }
         }
 
-        System.out.println("Found " + unmarkedNodes.size() + " unmarked nodes to potentially skip");
+        System.out.println("Found " + unmarkedNodes.size() + " unmarked nodes to remove");
+        System.out.println("Preserving " + markedNodes.size() + " marked nodes");
 
-        // Process each unmarked node
-        ArrayList<Node> nodesToRemove = new ArrayList<>();
-        int leafNodesRemoved = 0;
+        // Build new adjacency relationships
+        HashMap<Node, HashSet<Node>> newConnections = new HashMap<>();
+        for (Node marked : markedNodes) {
+            newConnections.put(marked, new HashSet<>());
+        }
 
+        // For each marked node, find all other marked nodes it can reach through unmarked nodes
+        for (Node marked : markedNodes) {
+            // BFS to find all reachable marked nodes through unmarked paths
+            HashSet<Node> visited = new HashSet<>();
+            Queue<Node> toVisit = new LinkedList<>();
+
+            visited.add(marked);
+
+            // Start BFS from all neighbors of this marked node
+            for (Node neighbor : marked.neighbours) {
+                if (!visited.contains(neighbor)) {
+                    visited.add(neighbor);
+                    if (markedNodes.contains(neighbor)) {
+                        // Direct connection to another marked node - preserve it
+                        newConnections.get(marked).add(neighbor);
+                        newConnections.get(neighbor).add(marked);
+                    } else if (unmarkedNodes.contains(neighbor)) {
+                        // Start searching through unmarked nodes
+                        toVisit.add(neighbor);
+                    }
+                }
+            }
+
+            // Continue BFS through unmarked nodes to find marked nodes
+            while (!toVisit.isEmpty()) {
+                Node current = toVisit.poll();
+
+                for (Node neighbor : current.neighbours) {
+                    if (!visited.contains(neighbor)) {
+                        visited.add(neighbor);
+
+                        if (markedNodes.contains(neighbor)) {
+                            // Found a marked node through unmarked path - create direct connection
+                            newConnections.get(marked).add(neighbor);
+                            newConnections.get(neighbor).add(marked);
+                            // Don't continue from marked nodes - we handle them separately
+                        } else if (unmarkedNodes.contains(neighbor)) {
+                            // Continue searching through unmarked nodes
+                            toVisit.add(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply the new connections
+        for (Node marked : markedNodes) {
+            marked.neighbours.clear();
+            marked.neighbours.addAll(newConnections.get(marked));
+        }
+
+        // Remove all unmarked nodes from the graph
         for (Node unmarked : unmarkedNodes) {
-            if (unmarked.neighbours.size() == 2) {
-                // This is a degree-2 node that can be skipped
-                Node neighbor1 = null;
-                Node neighbor2 = null;
-
-                // Get the two neighbors
-                Iterator<Node> neighborIter = unmarked.neighbours.iterator();
-                neighbor1 = neighborIter.next();
-                neighbor2 = neighborIter.next();
-
-                // Connect the neighbors directly, bypassing this unmarked node
-                neighbor1.neighbours.remove(unmarked);
-                neighbor2.neighbours.remove(unmarked);
-
-                neighbor1.neighbours.add(neighbor2);
-                neighbor2.neighbours.add(neighbor1);
-
-                // Mark this node for removal
-                nodesToRemove.add(unmarked);
-                nodesRemoved++;
-
-                System.out.println("Skipped unmarked node @" + unmarked.position +
-                                 ", directly connected @" + neighbor1.position +
-                                 " to @" + neighbor2.position);
-            } else if (unmarked.neighbours.size() == 1) {
-                // This is an unmarked leaf node - just remove it
-                Node neighbor = unmarked.neighbours.iterator().next();
-                neighbor.neighbours.remove(unmarked);
-
-                nodesToRemove.add(unmarked);
-                leafNodesRemoved++;
-
-                System.out.println("Removed unmarked leaf node @" + unmarked.position);
-            } else if (unmarked.neighbours.size() == 0) {
-                // Isolated unmarked node - remove it
-                nodesToRemove.add(unmarked);
-                leafNodesRemoved++;
-
-                System.out.println("Removed isolated unmarked node @" + unmarked.position);
-            }
-            // Nodes with degree > 2 are kept even if unmarked (they're junction points)
+            graph.nodes.remove(unmarked);
         }
-
-        // Remove all the skipped nodes from the graph
-        for (Node node : nodesToRemove) {
-            graph.nodes.remove(node);
-        }
-
-        // Count how many chains were simplified
-        chainsSkipped = nodesRemoved;
 
         System.out.println("Unmarked vertex skipping complete:");
-        System.out.println("- Degree-2 nodes skipped: " + nodesRemoved);
-        System.out.println("- Unmarked leaf nodes removed: " + leafNodesRemoved);
-        System.out.println("- Total nodes removed: " + (nodesRemoved + leafNodesRemoved));
+        System.out.println("- Total unmarked nodes removed: " + unmarkedNodes.size());
         System.out.println("- Remaining nodes: " + graph.nodes.size());
         System.out.println("- Remaining regions: " + graph.regionNodes.size());
         System.out.println("- Remaining chokepoints: " + graph.chokepointNodes.size());
+
+        // Verify connectivity
+        System.out.println("\nVerifying graph connectivity...");
+        HashSet<Node> visited = new HashSet<>();
+        Queue<Node> toVisit = new LinkedList<>();
+
+        if (!graph.nodes.isEmpty()) {
+            toVisit.add(graph.nodes.get(0));
+
+            while (!toVisit.isEmpty()) {
+                Node current = toVisit.poll();
+                if (!visited.contains(current)) {
+                    visited.add(current);
+                    toVisit.addAll(current.neighbours);
+                }
+            }
+
+            if (visited.size() == graph.nodes.size()) {
+                System.out.println("✓ Graph is fully connected (" + visited.size() + " nodes reachable)");
+            } else {
+                System.out.println("✗ Graph is DISCONNECTED! Only " + visited.size() + " of " +
+                                 graph.nodes.size() + " nodes are reachable");
+                System.out.println("Disconnected nodes:");
+                for (Node n : graph.nodes) {
+                    if (!visited.contains(n)) {
+                        String type = graph.regionNodes.contains(n) ? "Region" : "Chokepoint";
+                        System.out.println("  " + type + " @" + n.position);
+                    }
+                }
+            }
+        }
+    }
+
+    private void mergeContiguousNodes(RegionGraph graph) {
+        System.out.println("Merging contiguous nodes of the same type...");
+
+        // First, list all initial adjacent pairs
+        System.out.println("\nInitial adjacent regions before merging:");
+        for (Node region : graph.regionNodes) {
+            for (Node neighbor : region.neighbours) {
+                if (graph.regionNodes.contains(neighbor)) {
+                    // Only print each pair once (when first node < second node by position)
+                    if (region.position.x < neighbor.position.x ||
+                        (region.position.x == neighbor.position.x && region.position.y < neighbor.position.y)) {
+                        System.out.println("  Adjacent regions: @" + region.position +
+                                         " (r=" + String.format("%.1f", region.radius) + ") <-> @" +
+                                         neighbor.position + " (r=" + String.format("%.1f", neighbor.radius) + ")");
+                    }
+                }
+            }
+        }
+
+        int regionsMerged = 0;
+        int chokepointsMerged = 0;
+        HashSet<Node> nodesToRemove = new HashSet<>();
+
+        // Keep merging until no more merges are possible
+        boolean changed = true;
+        int iterations = 0;
+        while (changed) {
+            changed = false;
+            iterations++;
+            System.out.println("Merge iteration " + iterations + "...");
+
+            // Check each region for contiguous regions to merge
+            for (Node region : graph.regionNodes) {
+                if (nodesToRemove.contains(region)) continue;
+
+                for (Node neighbor : new HashSet<>(region.neighbours)) {
+                    if (graph.regionNodes.contains(neighbor) && !nodesToRemove.contains(neighbor)) {
+                        // Found two adjacent regions - merge them
+                        Node nodeToKeep, nodeToRemove;
+
+                        if (region.radius >= neighbor.radius) {
+                            nodeToKeep = region;
+                            nodeToRemove = neighbor;
+                        } else {
+                            nodeToKeep = neighbor;
+                            nodeToRemove = region;
+                        }
+
+                        System.out.println("Merging regions: keeping @" + nodeToKeep.position +
+                                         " (radius=" + String.format("%.1f", nodeToKeep.radius) +
+                                         "), removing @" + nodeToRemove.position +
+                                         " (radius=" + String.format("%.1f", nodeToRemove.radius) + ")");
+
+                        // Transfer all connections from nodeToRemove to nodeToKeep
+                        for (Node n : nodeToRemove.neighbours) {
+                            if (n != nodeToKeep) {
+                                n.neighbours.remove(nodeToRemove);
+                                n.neighbours.add(nodeToKeep);
+                                nodeToKeep.neighbours.add(n);
+                            }
+                        }
+
+                        // Remove the connection between the two nodes being merged
+                        nodeToKeep.neighbours.remove(nodeToRemove);
+
+                        // Mark for removal
+                        nodesToRemove.add(nodeToRemove);
+                        regionsMerged++;
+                        changed = true;
+                        break; // Start over since we modified the graph
+                    }
+                }
+                if (changed) break;
+            }
+
+            // Check each chokepoint for contiguous chokepoints to merge
+            if (!changed) {
+                for (Node chokepoint : graph.chokepointNodes) {
+                    if (nodesToRemove.contains(chokepoint)) continue;
+
+                    for (Node neighbor : new HashSet<>(chokepoint.neighbours)) {
+                        if (graph.chokepointNodes.contains(neighbor) && !nodesToRemove.contains(neighbor)) {
+                            // Found two adjacent chokepoints - merge them
+                            Node nodeToKeep, nodeToRemove;
+
+                            if (chokepoint.radius >= neighbor.radius) {
+                                nodeToKeep = chokepoint;
+                                nodeToRemove = neighbor;
+                            } else {
+                                nodeToKeep = neighbor;
+                                nodeToRemove = chokepoint;
+                            }
+
+                            System.out.println("Merging chokepoints: keeping @" + nodeToKeep.position +
+                                             " (radius=" + String.format("%.1f", nodeToKeep.radius) +
+                                             "), removing @" + nodeToRemove.position +
+                                             " (radius=" + String.format("%.1f", nodeToRemove.radius) + ")");
+
+                            // Transfer all connections from nodeToRemove to nodeToKeep
+                            for (Node n : nodeToRemove.neighbours) {
+                                if (n != nodeToKeep) {
+                                    n.neighbours.remove(nodeToRemove);
+                                    n.neighbours.add(nodeToKeep);
+                                    nodeToKeep.neighbours.add(n);
+                                }
+                            }
+
+                            // Remove the connection between the two nodes being merged
+                            nodeToKeep.neighbours.remove(nodeToRemove);
+
+                            // Mark for removal
+                            nodesToRemove.add(nodeToRemove);
+                            chokepointsMerged++;
+                            changed = true;
+                            break; // Start over since we modified the graph
+                        }
+                    }
+                    if (changed) break;
+                }
+            }
+        }
+
+        // Remove all merged nodes from the graph
+        for (Node node : nodesToRemove) {
+            graph.nodes.remove(node);
+            graph.regionNodes.remove(node);
+            graph.chokepointNodes.remove(node);
+        }
+
+        System.out.println("Contiguous node merging complete:");
+        System.out.println("- Regions merged: " + regionsMerged);
+        System.out.println("- Chokepoints merged: " + chokepointsMerged);
+        System.out.println("- Final graph size: " + graph.nodes.size() + " nodes");
+        System.out.println("- Final regions: " + graph.regionNodes.size());
+        System.out.println("- Final chokepoints: " + graph.chokepointNodes.size());
+
+        // Debug: Check if any regions are still adjacent
+        System.out.println("\nChecking for remaining adjacent nodes of same type:");
+        int adjacentRegions = 0;
+        int adjacentChokepoints = 0;
+
+        for (Node node : graph.regionNodes) {
+            for (Node neighbor : node.neighbours) {
+                if (graph.regionNodes.contains(neighbor)) {
+                    System.out.println("WARNING: Adjacent regions still exist: @" + node.position +
+                                     " (r=" + String.format("%.1f", node.radius) + ") <-> @" +
+                                     neighbor.position + " (r=" + String.format("%.1f", neighbor.radius) + ")");
+                    adjacentRegions++;
+                }
+            }
+        }
+
+        for (Node node : graph.chokepointNodes) {
+            for (Node neighbor : node.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    System.out.println("WARNING: Adjacent chokepoints still exist: @" + node.position +
+                                     " (r=" + String.format("%.1f", node.radius) + ") <-> @" +
+                                     neighbor.position + " (r=" + String.format("%.1f", neighbor.radius) + ")");
+                    adjacentChokepoints++;
+                }
+            }
+        }
+
+        if (adjacentRegions > 0) {
+            System.out.println("Found " + (adjacentRegions/2) + " pairs of adjacent regions that weren't merged");
+        }
+        if (adjacentChokepoints > 0) {
+            System.out.println("Found " + (adjacentChokepoints/2) + " pairs of adjacent chokepoints that weren't merged");
+        }
+
+        // List all regions with their connections for debugging
+        System.out.println("\nFinal region connections:");
+        int rIdx = 0;
+        for (Node region : graph.regionNodes) {
+            System.out.print("R" + rIdx + " @" + region.position + " connected to: ");
+            for (Node neighbor : region.neighbours) {
+                String type = graph.regionNodes.contains(neighbor) ? "R" : "C";
+                System.out.print(type + "@" + neighbor.position + " ");
+            }
+            System.out.println();
+            rIdx++;
+        }
     }
 
     private RegionGraph convertGraph(HalfEdgeDiagram g){
