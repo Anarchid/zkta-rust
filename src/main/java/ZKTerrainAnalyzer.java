@@ -1955,7 +1955,15 @@ public class ZKTerrainAnalyzer {
 
     private boolean checkBoundaryConnectivity(ArrayList<Point> boundary) {
         if (boundary.size() < 3) {
+            System.out.println("    DEBUG: Boundary has only " + boundary.size() + " points, need at least 3 for closed polygon");
             return false;  // Need at least 3 points for a polygon
+        }
+
+        System.out.println("    DEBUG: Checking connectivity for " + boundary.size() + " point boundary:");
+        for (int i = 0; i < boundary.size(); i++) {
+            Point current = boundary.get(i);
+            Point next = boundary.get((i + 1) % boundary.size());
+            System.out.println("      Segment " + i + ": " + current + " -> " + next);
         }
 
         // Create a proper graph-based connectivity check
@@ -1972,24 +1980,38 @@ public class ZKTerrainAnalyzer {
             if (current != next) {
                 pointDegree.put(current, pointDegree.getOrDefault(current, 0) + 1);
                 pointDegree.put(next, pointDegree.getOrDefault(next, 0) + 1);
+            } else {
+                System.out.println("    DEBUG: Skipping self-loop at " + current);
             }
         }
 
-        // For a properly closed boundary, each point should have degree 2
-        // (connected to exactly 2 other points)
+        System.out.println("    DEBUG: Point degrees:");
+        boolean allCorrect = true;
         for (java.util.Map.Entry<Point, Integer> entry : pointDegree.entrySet()) {
+            System.out.println("      " + entry.getKey() + " -> degree " + entry.getValue());
             if (entry.getValue() != 2) {
-                System.out.println("Point " + entry.getKey() + " has degree " + entry.getValue() + " instead of 2");
-                return false;
+                System.out.println("        ERROR: Expected degree 2, got " + entry.getValue());
+                allCorrect = false;
             }
+        }
+
+        if (!allCorrect) {
+            return false;
         }
 
         // Additional check: ensure we can traverse the entire boundary
-        return canTraverseBoundary(boundary);
+        boolean traversable = canTraverseBoundary(boundary);
+        System.out.println("    DEBUG: Boundary traversable: " + traversable);
+        return traversable;
     }
 
     private boolean canTraverseBoundary(ArrayList<Point> boundary) {
-        if (boundary.isEmpty()) return false;
+        if (boundary.isEmpty()) {
+            System.out.println("    DEBUG TRAVERSE: Empty boundary");
+            return false;
+        }
+
+        System.out.println("    DEBUG TRAVERSE: Checking traversability for boundary with " + boundary.size() + " points");
 
         // Build adjacency map using point identity (==)
         java.util.HashMap<Point, java.util.ArrayList<Point>> adjacency = new java.util.HashMap<>();
@@ -2001,13 +2023,65 @@ public class ZKTerrainAnalyzer {
             if (current != next) { // Use identity comparison, not equals
                 adjacency.computeIfAbsent(current, k -> new java.util.ArrayList<>()).add(next);
                 adjacency.computeIfAbsent(next, k -> new java.util.ArrayList<>()).add(current);
+            } else {
+                System.out.println("    DEBUG TRAVERSE: Skipping self-loop at " + current);
             }
         }
 
-        // Try to traverse from the first point
+        System.out.println("    DEBUG TRAVERSE: Adjacency map:");
+        for (java.util.Map.Entry<Point, java.util.ArrayList<Point>> entry : adjacency.entrySet()) {
+            System.out.println("      " + entry.getKey() + " -> " + entry.getValue());
+        }
+
+        // For a closed polygon, we need to check if we can traverse the boundary as a cycle
+        // Start from first point and try to follow the boundary sequence
         Point start = boundary.get(0);
-        java.util.HashSet<Point> visited = new java.util.HashSet<>();
-        return traverseFrom(start, adjacency, visited, boundary.size());
+        boolean canTraverseAsCycle = canTraverseSequentialBoundary(boundary, adjacency);
+        System.out.println("    DEBUG TRAVERSE: Can traverse as sequential cycle: " + canTraverseAsCycle);
+
+        return canTraverseAsCycle;
+    }
+
+    private boolean canTraverseSequentialBoundary(ArrayList<Point> boundary,
+                                                 java.util.HashMap<Point, java.util.ArrayList<Point>> adjacency) {
+        if (boundary.size() < 3) {
+            System.out.println("    DEBUG TRAVERSE: Boundary too small for polygon");
+            return false;
+        }
+
+        // Check if we can follow the exact boundary sequence
+        for (int i = 0; i < boundary.size(); i++) {
+            Point current = boundary.get(i);
+            Point next = boundary.get((i + 1) % boundary.size());
+
+            if (current == next) {
+                System.out.println("    DEBUG TRAVERSE: Self-loop at " + current + ", skipping");
+                continue; // Skip self-loops
+            }
+
+            java.util.ArrayList<Point> neighbors = adjacency.get(current);
+            if (neighbors == null) {
+                System.out.println("    DEBUG TRAVERSE: No neighbors for " + current);
+                return false;
+            }
+
+            boolean foundNext = false;
+            for (Point neighbor : neighbors) {
+                if (neighbor == next) { // Use identity comparison
+                    foundNext = true;
+                    break;
+                }
+            }
+
+            if (!foundNext) {
+                System.out.println("    DEBUG TRAVERSE: Cannot reach " + next + " from " + current);
+                System.out.println("    DEBUG TRAVERSE: Available neighbors: " + neighbors);
+                return false;
+            }
+        }
+
+        System.out.println("    DEBUG TRAVERSE: All sequential connections verified");
+        return true;
     }
 
     private boolean traverseFrom(Point current, java.util.HashMap<Point, java.util.ArrayList<Point>> adjacency,
