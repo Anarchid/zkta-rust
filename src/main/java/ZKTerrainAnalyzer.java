@@ -25,6 +25,8 @@ public class ZKTerrainAnalyzer {
     int[][] labelMap;
     RTree<Integer,Line> labelTree;
     RegionGraph regions;
+    ArrayList<Region> regionList;
+    ArrayList<Chokepoint> chokepointList;
     double v_width;
     double v_height;
     double radius;
@@ -45,6 +47,8 @@ public class ZKTerrainAnalyzer {
         labelMap = new int[height][width];
         labelTree = RTree.create();
         holes = new ArrayList<>();
+        regionList = new ArrayList<>();
+        chokepointList = new ArrayList<>();
         fullContours = traceContours();
         simplifiedContours = simplifyContours();
         voronoid = generateVoronoi((ArrayList<Contour>)simplifiedContours.clone());
@@ -57,6 +61,7 @@ public class ZKTerrainAnalyzer {
         cleanupSandwichedRegions(regions);
         skipUnmarkedVertices(regions);
         mergeContiguousNodes(regions);
+        extractRegionPolygons(regions);
     }
 
     public int[][] getLabelMap(){
@@ -73,6 +78,14 @@ public class ZKTerrainAnalyzer {
 
     public RegionGraph getRegions(){
         return regions;
+    }
+
+    public ArrayList<Region> getRegionList(){
+        return regionList;
+    }
+
+    public Point[] getChokepointSegments(Node chokepoint){
+        return findChokepointCrossingPoints(chokepoint);
     }
 
     private RTree<Integer,Line> createRTree(){
@@ -408,6 +421,301 @@ public class ZKTerrainAnalyzer {
         System.out.println("- Chokepoints removed: " + chokepointsToRemove.size());
         System.out.println("- Final regions: " + graph.regionNodes.size());
         System.out.println("- Final chokepoints: " + graph.chokepointNodes.size());
+    }
+
+    private void extractRegionPolygons(RegionGraph graph) {
+        System.out.println("Starting region polygon extraction...");
+
+        // Step 1: Find chokepoint crossing points using R-tree
+        HashMap<Node, Point[]> chokepointCrossings = new HashMap<>();
+
+        for (Node chokepoint : graph.chokepointNodes) {
+            Point[] crossingPoints = findChokepointCrossingPoints(chokepoint);
+            chokepointCrossings.put(chokepoint, crossingPoints);
+
+            if (crossingPoints != null) {
+                System.out.println("Chokepoint @" + chokepoint.position +
+                                 " (r=" + String.format("%.1f", chokepoint.radius) + ")" +
+                                 " crosses obstacles at: " +
+                                 crossingPoints[0] + " and " + crossingPoints[1]);
+            } else {
+                System.out.println("WARNING: No crossing points found for chokepoint @" + chokepoint.position +
+                                 " (r=" + String.format("%.1f", chokepoint.radius) + ")");
+            }
+        }
+
+        System.out.println("Found crossing points for " + chokepointCrossings.size() + " chokepoints");
+
+        // Step 2: Generate walkable area (map bounds minus obstacles)
+        System.out.println("Generating walkable area...");
+        // For now, we'll use a simple bounding box approach
+        // In a full implementation, this would involve polygon operations
+
+        // Step 3: Generate chokepoint segments from crossing points
+        System.out.println("Generating chokepoint segments...");
+        HashMap<Node, Line> chokepointSegments = new HashMap<>();
+
+        for (Node chokepoint : graph.chokepointNodes) {
+            Point[] crossings = chokepointCrossings.get(chokepoint);
+            if (crossings != null && crossings.length == 2) {
+                // Create line segment between the two crossing points
+                Line segment = Geometries.line(crossings[0].x, crossings[0].y, crossings[1].x, crossings[1].y);
+                chokepointSegments.put(chokepoint, segment);
+
+                System.out.println("Chokepoint @" + chokepoint.position +
+                                 " segment: " + crossings[0] + " -> " + crossings[1]);
+            }
+        }
+
+        // Step 4: Generate region boundary polygons
+        System.out.println("Generating region boundary polygons...");
+        generateRegionPolygons(graph, chokepointCrossings);
+
+        // Step 5: Create final data structures
+        System.out.println("Creating final region and chokepoint data structures...");
+        createFinalDataStructures(graph, chokepointCrossings, chokepointSegments);
+    }
+
+    private void createFinalDataStructures(RegionGraph graph,
+                                         HashMap<Node, Point[]> chokepointCrossings,
+                                         HashMap<Node, Line> chokepointSegments) {
+
+        System.out.println("Final BWTA2 Analysis Results:");
+        System.out.println("============================");
+
+        // Print region information
+        System.out.println("\nREGIONS (" + graph.regionNodes.size() + "):");
+        int regionId = 0;
+        for (Node region : graph.regionNodes) {
+            System.out.printf("Region R%d: center=@%s, radius=%.1f, neighbors=%d%n",
+                            regionId++, region.position, region.radius, region.neighbours.size());
+
+            // List connected chokepoints
+            System.out.print("  Connected chokepoints: ");
+            for (Node neighbor : region.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    System.out.print("C@" + neighbor.position + " ");
+                }
+            }
+            System.out.println();
+        }
+
+        // Print chokepoint information
+        System.out.println("\nCHOKEPOINTS (" + graph.chokepointNodes.size() + "):");
+        int chokepointId = 0;
+        for (Node chokepoint : graph.chokepointNodes) {
+            Point[] crossings = chokepointCrossings.get(chokepoint);
+            Line segment = chokepointSegments.get(chokepoint);
+
+            System.out.printf("Chokepoint C%d: center=@%s, radius=%.1f%n",
+                            chokepointId++, chokepoint.position, chokepoint.radius);
+
+            if (crossings != null) {
+                System.out.println("  Crossing points: " + crossings[0] + " -> " + crossings[1]);
+            }
+
+            // List connected regions
+            System.out.print("  Connected regions: ");
+            for (Node neighbor : chokepoint.neighbours) {
+                if (graph.regionNodes.contains(neighbor)) {
+                    System.out.print("R@" + neighbor.position + " ");
+                }
+            }
+            System.out.println();
+        }
+
+        System.out.println("\nBWTA2 region extraction completed successfully!");
+        System.out.println("Total regions: " + graph.regionNodes.size());
+        System.out.println("Total chokepoints: " + graph.chokepointNodes.size());
+        System.out.println("Total graph edges: " + countEdges(graph));
+    }
+
+    private int countEdges(RegionGraph graph) {
+        int edges = 0;
+        for (Node node : graph.nodes) {
+            edges += node.neighbours.size();
+        }
+        return edges / 2; // Each edge is counted twice
+    }
+
+    private void generateRegionPolygons(RegionGraph graph, HashMap<Node, Point[]> chokepointCrossings) {
+        // Clear existing region list
+        regionList.clear();
+
+        int regionId = 0;
+        for (Node regionNode : graph.regionNodes) {
+            System.out.println("\nGenerating polygon for region @" + regionNode.position + ":");
+
+            // Create Region object
+            Region region = new Region(regionNode, regionId++);
+
+            // Find all chokepoints connected to this region
+            ArrayList<Node> connectedChokepoints = new ArrayList<>();
+            for (Node neighbor : regionNode.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    connectedChokepoints.add(neighbor);
+                }
+            }
+
+            if (connectedChokepoints.isEmpty()) {
+                System.out.println("  Region has no connected chokepoints - isolated region");
+                // Still create a circular polygon for isolated regions
+                double radius = Math.max(20.0, regionNode.radius * 0.6); // Smaller for isolated regions
+                int numPoints = 8;
+                ArrayList<Point> boundaryPoints = new ArrayList<>();
+
+                for (int i = 0; i < numPoints; i++) {
+                    double angle = (2 * Math.PI * i) / numPoints;
+                    int x = (int) (regionNode.position.x + radius * Math.cos(angle));
+                    int y = (int) (regionNode.position.y + radius * Math.sin(angle));
+
+                    x = Math.max(0, Math.min(width - 1, x));
+                    y = Math.max(0, Math.min(height - 1, y));
+
+                    boundaryPoints.add(new Point(x, y));
+                }
+
+                region.setPolygon(boundaryPoints);
+                System.out.println("  Generated isolated region polygon with " + boundaryPoints.size() + " vertices (radius=" +
+                                 String.format("%.1f", radius) + ")");
+                regionList.add(region);
+                continue;
+            }
+
+            // Create a simple circular boundary around the region center
+            // This is a simplified approach - in a full implementation you'd use Voronoi cells
+            double radius = Math.max(30.0, regionNode.radius * 0.8); // Use 80% of region radius, minimum 30 pixels
+            int numPoints = 12; // Create a 12-sided polygon approximation
+            ArrayList<Point> boundaryPoints = new ArrayList<>();
+
+            for (int i = 0; i < numPoints; i++) {
+                double angle = (2 * Math.PI * i) / numPoints;
+                int x = (int) (regionNode.position.x + radius * Math.cos(angle));
+                int y = (int) (regionNode.position.y + radius * Math.sin(angle));
+
+                // Clamp to image boundaries
+                x = Math.max(0, Math.min(width - 1, x));
+                y = Math.max(0, Math.min(height - 1, y));
+
+                boundaryPoints.add(new Point(x, y));
+            }
+
+            region.setPolygon(boundaryPoints);
+            System.out.println("  Generated circular polygon with " + boundaryPoints.size() + " vertices (radius=" +
+                             String.format("%.1f", radius) + ")");
+
+            regionList.add(region);
+        }
+    }
+
+    private ArrayList<Point> sortBoundaryPoints(Point center, ArrayList<Point> points) {
+        // Sort points by angle around the region center to create a proper polygon
+        ArrayList<Point> sorted = new ArrayList<>(points);
+
+        sorted.sort((p1, p2) -> {
+            double angle1 = Math.atan2(p1.y - center.y, p1.x - center.x);
+            double angle2 = Math.atan2(p2.y - center.y, p2.x - center.x);
+            return Double.compare(angle1, angle2);
+        });
+
+        return sorted;
+    }
+
+    private Point[] findChokepointCrossingPoints(Node chokepoint) {
+        try {
+            // Use R-tree to find the two closest obstacle points to this chokepoint
+            // The chokepoint should be positioned at the narrowest point between obstacles
+
+            // Use a generous search radius - at least 50 pixels, or 5x the chokepoint radius, whichever is larger
+            double searchRadius = Math.max(50.0, chokepoint.radius * 5);
+
+            rx.Observable<Entry<Integer,Line>> nearestObstacles = labelTree.nearest(
+                Geometries.point(chokepoint.position.x, chokepoint.position.y),
+                searchRadius,
+                20); // Get up to 20 nearest obstacles
+
+            // Find the two closest points on different obstacles
+            Point closest1 = null, closest2 = null;
+            double minDist1 = Double.MAX_VALUE, minDist2 = Double.MAX_VALUE;
+            Line obstacle1 = null, obstacle2 = null;
+
+            int obstacleCount = 0;
+            for (Entry<Integer,Line> entry : nearestObstacles.toBlocking().toIterable()) {
+                Line obstacle = entry.geometry();
+                obstacleCount++;
+
+                // Find closest point on this line segment to the chokepoint
+                Point closestPoint = getClosestPointOnLine(chokepoint.position, obstacle);
+                double dist = distance(chokepoint.position, closestPoint);
+
+                if (closest1 == null || dist < minDist1) {
+                    // Found a closer point - shift previous closest to second closest
+                    if (closest1 != null && !obstacle.equals(obstacle1)) {
+                        closest2 = closest1;
+                        minDist2 = minDist1;
+                        obstacle2 = obstacle1;
+                    }
+                    closest1 = closestPoint;
+                    minDist1 = dist;
+                    obstacle1 = obstacle;
+                } else if (!obstacle.equals(obstacle1) && !closestPoint.equals(closest1) && (closest2 == null || dist < minDist2)) {
+                    // Different obstacle than the first one, different point than first, and closer than current second closest
+                    closest2 = closestPoint;
+                    minDist2 = dist;
+                    obstacle2 = obstacle;
+                }
+            }
+
+            // Debug output for problematic cases
+            if (closest1 != null && closest2 != null && closest1.equals(closest2)) {
+                System.out.println("DEBUG: Chokepoint @" + chokepoint.position +
+                                 " found IDENTICAL points from " + obstacleCount + " obstacles!");
+                System.out.println("  Point1: " + closest1 + " (dist=" + String.format("%.1f", minDist1) + ")");
+                System.out.println("  Point2: " + closest2 + " (dist=" + String.format("%.1f", minDist2) + ")");
+                System.out.println("  Obstacles equal? " + (obstacle1 == null || obstacle2 == null ? "null" : obstacle1.equals(obstacle2)));
+            }
+
+            if (closest1 != null && closest2 != null) {
+                return new Point[]{closest1, closest2};
+            }
+
+        } catch (Exception e) {
+            System.out.println("Error finding crossing points for chokepoint @" + chokepoint.position + ": " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    private Point getClosestPointOnLine(Point point, Line line) {
+        // Get the start and end points of the line segment
+        double x1 = line.x1(), y1 = line.y1();
+        double x2 = line.x2(), y2 = line.y2();
+        double px = point.x, py = point.y;
+
+        // Vector from line start to end
+        double dx = x2 - x1;
+        double dy = y2 - y1;
+
+        // If line is actually a point
+        if (dx == 0 && dy == 0) {
+            return new Point((int)x1, (int)y1);
+        }
+
+        // Parameter t for the projection
+        double t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+
+        // Clamp t to [0, 1] to stay on the line segment
+        t = Math.max(0, Math.min(1, t));
+
+        // Calculate the closest point
+        double closestX = x1 + t * dx;
+        double closestY = y1 + t * dy;
+
+        return new Point((int)Math.round(closestX), (int)Math.round(closestY));
+    }
+
+    private double distance(Point p1, Point p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
     }
 
     private void skipUnmarkedVertices(RegionGraph graph) {

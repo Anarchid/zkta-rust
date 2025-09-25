@@ -6,7 +6,6 @@ import javax.imageio.ImageIO;
 import javax.swing.JFrame;
 import javax.swing.ImageIcon;
 import javax.swing.JLabel;
-import javax.swing.plaf.synth.Region;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
@@ -201,6 +200,23 @@ public class ZKTAWindow {
 
             // Reset to full opacity for subsequent drawing
             g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
+
+            // Draw chokepoint segments - red lines between closest obstacles
+            bg.setColor(Color.RED);
+            int segmentsDrawn = 0;
+            for(Node chokepoint : r.chokepointNodes){
+                Point[] segments = zkta.getChokepointSegments(chokepoint);
+                if (segments != null && segments.length == 2) {
+                    // Only draw if the two points are actually different
+                    if (!segments[0].equals(segments[1])) {
+                        bg.drawLine(segments[0].x, segments[0].y, segments[1].x, segments[1].y);
+                        segmentsDrawn++;
+                    }
+                }
+            }
+            System.out.println("Drew " + segmentsDrawn + " chokepoint segments out of " + r.chokepointNodes.size() + " chokepoints");
+
+            // Region polygons disabled for now - working on chokepoint segments
 
             bg.setColor(Color.YELLOW);
             for(int i = 0; i < simple.size();i++){
