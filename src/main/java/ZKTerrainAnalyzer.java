@@ -35,6 +35,7 @@ public class ZKTerrainAnalyzer {
     int height;
     static int TOO_CLOSE_TO_OBSTACLE = 5;
     ArrayList<Edge> pruned;
+    RTree<Integer, Line> simplifiedLabelTree;  // R-tree with simplified geometry
 
     ZKTerrainAnalyzer(BufferedImage img){
         width = img.getWidth();
@@ -61,6 +62,9 @@ public class ZKTerrainAnalyzer {
         cleanupSandwichedRegions(regions);
         skipUnmarkedVertices(regions);
         mergeContiguousNodes(regions);
+        simplifiedLabelTree = createSimplifiedRTree();
+        // Recalculate radii using the simplified geometry
+        calculateNodeRadii(regions);
         extractRegionPolygons(regions);
     }
 
@@ -102,6 +106,36 @@ public class ZKTerrainAnalyzer {
         return labelTree;
     }
 
+    private RTree<Integer,Line> createSimplifiedRTree(){
+        long timeStarted = System.currentTimeMillis();
+        RTree<Integer,Line> simplifiedTree = RTree.create();
+        int i = 0;
+
+        // Add map boundary segments as obstacles
+        // Top edge: (0,0) to (width-1,0)
+        simplifiedTree = simplifiedTree.add(i++, Geometries.line(0, 0, width-1, 0));
+        // Bottom edge: (0,height-1) to (width-1,height-1)
+        simplifiedTree = simplifiedTree.add(i++, Geometries.line(0, height-1, width-1, height-1));
+        // Left edge: (0,0) to (0,height-1)
+        simplifiedTree = simplifiedTree.add(i++, Geometries.line(0, 0, 0, height-1));
+        // Right edge: (width-1,0) to (width-1,height-1)
+        simplifiedTree = simplifiedTree.add(i++, Geometries.line(width-1, 0, width-1, height-1));
+
+        // Use the CURRENT simplified contours (after all processing)
+        ArrayList<Contour> currentSimplified = getSimplifiedContours();
+        for(Contour c : currentSimplified){
+            for (int j = 1; j < c.points.size(); j++){
+                Point p1 = c.points.get(j-1);
+                Point p2 = c.points.get(j);
+                simplifiedTree = simplifiedTree.add(i++, Geometries.line(p1.x, p1.y, p2.x, p2.y));
+            }
+        }
+        System.out.println("Generated Simplified RTree with " + i + " line segments (" +
+                         "4 map boundaries + " + (i-4) + " obstacle segments) in " +
+                         (System.currentTimeMillis() - timeStarted) + "ms");
+        return simplifiedTree;
+    }
+
     private double distanceToLine(Point p, Line l){
         double A = p.x - l.x1(); // position of point rel one end of line
         double B = p.y - l.y1();
@@ -117,9 +151,27 @@ public class ZKTerrainAnalyzer {
     }
 
     private double getDistanceToObstacle(Node n){
-        rx.Observable<Entry<Integer,Line>> closestObstacle = labelTree.nearest((Geometries.point(n.position.x,n.position.y)),radius*2,1);
-        Line l = closestObstacle.toBlocking().first().geometry();
-        return distanceToLine(n.position, l);
+        // Use the simplified R-tree if available, otherwise fall back to the original
+        RTree<Integer,Line> treeToUse = (simplifiedLabelTree != null) ? simplifiedLabelTree : labelTree;
+        double searchRadius = radius*2;
+
+        rx.Observable<Entry<Integer,Line>> closestObstacle = treeToUse.nearest((Geometries.point(n.position.x,n.position.y)),searchRadius,1);
+        Entry<Integer,Line> entry = closestObstacle.toBlocking().first();
+        Line l = entry.geometry();
+        Integer obstacleId = entry.value();
+        double distance = distanceToLine(n.position, l);
+
+        // Log for problematic chokepoint
+        if (n.position.x == 105 && n.position.y == 410) {
+            String treeType = (treeToUse == simplifiedLabelTree) ? "simplified" : "original";
+            System.out.println("DEBUG RADIUS: Node @" + n.position +
+                             " found obstacle ID=" + obstacleId +
+                             " at distance=" + String.format("%.1f", distance) +
+                             " (search radius=" + String.format("%.1f", searchRadius) +
+                             ", using " + treeType + " tree)");
+        }
+
+        return distance;
     }
 
     private void calculateNodeRadii(RegionGraph graph) {
@@ -626,10 +678,10 @@ public class ZKTerrainAnalyzer {
             // Use R-tree to find the two closest obstacle points to this chokepoint
             // The chokepoint should be positioned at the narrowest point between obstacles
 
-            // Use a generous search radius - at least 50 pixels, or 5x the chokepoint radius, whichever is larger
-            double searchRadius = Math.max(50.0, chokepoint.radius * 5);
+            // Use a generous search radius - at least 100 pixels, or 10x the chokepoint radius, whichever is larger
+            double searchRadius = Math.max(100.0, chokepoint.radius * 10);
 
-            rx.Observable<Entry<Integer,Line>> nearestObstacles = labelTree.nearest(
+            rx.Observable<Entry<Integer,Line>> nearestObstacles = simplifiedLabelTree.nearest(
                 Geometries.point(chokepoint.position.x, chokepoint.position.y),
                 searchRadius,
                 20); // Get up to 20 nearest obstacles
@@ -640,9 +692,12 @@ public class ZKTerrainAnalyzer {
             Line obstacle1 = null, obstacle2 = null;
 
             int obstacleCount = 0;
+            ArrayList<Integer> foundObstacleIds = new ArrayList<>();
             for (Entry<Integer,Line> entry : nearestObstacles.toBlocking().toIterable()) {
                 Line obstacle = entry.geometry();
+                Integer obstacleId = entry.value();
                 obstacleCount++;
+                foundObstacleIds.add(obstacleId);
 
                 // Find closest point on this line segment to the chokepoint
                 Point closestPoint = getClosestPointOnLine(chokepoint.position, obstacle);
@@ -677,6 +732,22 @@ public class ZKTerrainAnalyzer {
 
             if (closest1 != null && closest2 != null) {
                 return new Point[]{closest1, closest2};
+            } else if (closest1 != null) {
+                System.out.println("DEBUG: Chokepoint @" + chokepoint.position + " (r=" + String.format("%.1f", chokepoint.radius) +
+                                 ") found only one obstacle point: " + closest1 + " (dist=" + String.format("%.1f", minDist1) +
+                                 ") from " + obstacleCount + " obstacles searched");
+            } else {
+                System.out.println("DEBUG: Chokepoint @" + chokepoint.position + " (r=" + String.format("%.1f", chokepoint.radius) +
+                                 ") found NO obstacle points from " + obstacleCount + " obstacles searched (search radius=" +
+                                 String.format("%.1f", searchRadius) + ")");
+            }
+
+            // Log for problematic chokepoint
+            if (chokepoint.position.x == 105 && chokepoint.position.y == 410) {
+                System.out.println("DEBUG CROSSING: Node @" + chokepoint.position +
+                                 " searched " + obstacleCount + " obstacles" +
+                                 " (search radius=" + String.format("%.1f", searchRadius) + ")" +
+                                 " found IDs: " + foundObstacleIds);
             }
 
         } catch (Exception e) {

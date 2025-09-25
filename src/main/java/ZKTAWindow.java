@@ -204,6 +204,7 @@ public class ZKTAWindow {
             // Draw chokepoint segments - red lines between closest obstacles
             bg.setColor(Color.RED);
             int segmentsDrawn = 0;
+            int chokepointIndex = 0;
             for(Node chokepoint : r.chokepointNodes){
                 Point[] segments = zkta.getChokepointSegments(chokepoint);
                 if (segments != null && segments.length == 2) {
@@ -211,8 +212,17 @@ public class ZKTAWindow {
                     if (!segments[0].equals(segments[1])) {
                         bg.drawLine(segments[0].x, segments[0].y, segments[1].x, segments[1].y);
                         segmentsDrawn++;
+                    } else {
+                        System.out.println("DEBUG: C" + chokepointIndex + " @" + chokepoint.position +
+                                         " (r=" + String.format("%.1f", chokepoint.radius) +
+                                         ") has identical crossing points: " + segments[0]);
                     }
+                } else {
+                    System.out.println("DEBUG: C" + chokepointIndex + " @" + chokepoint.position +
+                                     " (r=" + String.format("%.1f", chokepoint.radius) +
+                                     ") has no segments (null or wrong length)");
                 }
+                chokepointIndex++;
             }
             System.out.println("Drew " + segmentsDrawn + " chokepoint segments out of " + r.chokepointNodes.size() + " chokepoints");
 
