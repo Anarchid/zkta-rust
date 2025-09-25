@@ -28,6 +28,7 @@ public class ZKTerrainAnalyzer {
     ArrayList<Region> regionList;
     ArrayList<Chokepoint> chokepointList;
     ArrayList<MapEdgeContact> mapEdgeContacts;
+    HashMap<Node, ArrayList<MapEdgeContact>> edgyRegionMap; // Maps region nodes to their edge contacts
     double v_width;
     double v_height;
     double radius;
@@ -54,6 +55,7 @@ public class ZKTerrainAnalyzer {
         regionList = new ArrayList<>();
         chokepointList = new ArrayList<>();
         mapEdgeContacts = new ArrayList<>();
+        edgyRegionMap = new HashMap<>();
         fullContours = traceContours();
         simplifiedContours = simplifyContours();
         voronoid = generateVoronoi((ArrayList<Contour>)simplifiedContours.clone());
@@ -76,6 +78,9 @@ public class ZKTerrainAnalyzer {
 
         // Detect map edge contacts for obstacles and chokepoints
         detectMapEdgeContacts();
+
+        // Mark regions as edgy if they have map edge contacts
+        markEdgyRegions(regions);
 
         // Build region boundaries from chokepoint contacts
         buildRegionBoundariesFromChokepoints(regions);
@@ -1351,6 +1356,104 @@ public class ZKTerrainAnalyzer {
         return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
     }
 
+    // Trace along a map edge between two points
+    private ArrayList<Point> traceAlongMapEdge(Point start, Point end, MapEdge edge) {
+        ArrayList<Point> path = new ArrayList<>();
+
+        if (start.equals(end)) {
+            path.add(start);
+            return path;
+        }
+
+        // Validate that both points lie on the specified edge
+        if (!isPointOnMapEdge(start, edge) || !isPointOnMapEdge(end, edge)) {
+            System.out.println("  ERROR: Points not on map edge " + edge);
+            return path;
+        }
+
+        // Generate path along the edge
+        switch (edge) {
+            case TOP:
+                return traceAlongHorizontalEdge(start, end, 0);
+            case BOTTOM:
+                return traceAlongHorizontalEdge(start, end, height - 1);
+            case LEFT:
+                return traceAlongVerticalEdge(start, end, 0);
+            case RIGHT:
+                return traceAlongVerticalEdge(start, end, width - 1);
+            default:
+                return path;
+        }
+    }
+
+    private ArrayList<Point> traceAlongHorizontalEdge(Point start, Point end, int y) {
+        ArrayList<Point> path = new ArrayList<>();
+        int startX = Math.min(start.x, end.x);
+        int endX = Math.max(start.x, end.x);
+
+        for (int x = startX; x <= endX; x++) {
+            path.add(new Point(x, y));
+        }
+
+        // Reverse if we need to go from right to left
+        if (start.x > end.x) {
+            Collections.reverse(path);
+        }
+
+        return path;
+    }
+
+    private ArrayList<Point> traceAlongVerticalEdge(Point start, Point end, int x) {
+        ArrayList<Point> path = new ArrayList<>();
+        int startY = Math.min(start.y, end.y);
+        int endY = Math.max(start.y, end.y);
+
+        for (int y = startY; y <= endY; y++) {
+            path.add(new Point(x, y));
+        }
+
+        // Reverse if we need to go from bottom to top
+        if (start.y > end.y) {
+            Collections.reverse(path);
+        }
+
+        return path;
+    }
+
+    private boolean isPointOnMapEdge(Point point, MapEdge edge) {
+        switch (edge) {
+            case TOP:
+                return point.y == 0 && point.x >= 0 && point.x < width;
+            case BOTTOM:
+                return point.y == height - 1 && point.x >= 0 && point.x < width;
+            case LEFT:
+                return point.x == 0 && point.y >= 0 && point.y < height;
+            case RIGHT:
+                return point.x == width - 1 && point.y >= 0 && point.y < height;
+            default:
+                return false;
+        }
+    }
+
+    // Find the nearest edgy vertex on the same map edge belonging to the same region
+    private Point findNearestEdgyVertex(Point currentVertex, MapEdge edge, Region region) {
+        ArrayList<MapEdgeContact> edgeContacts = region.getContactsForEdge(edge);
+        Point nearest = null;
+        double minDistance = Double.MAX_VALUE;
+
+        for (MapEdgeContact contact : edgeContacts) {
+            if (!contact.contactPoint.equals(currentVertex)) {
+                double dist = distance(currentVertex, contact.contactPoint);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    nearest = contact.contactPoint;
+                }
+            }
+        }
+
+        return nearest;
+    }
+
     private void splitObstacleSegmentsAtChokepointContacts(RegionGraph graph) {
         System.out.println("Splitting obstacle segments at chokepoint contact points...");
 
@@ -1508,6 +1611,16 @@ public class ZKTerrainAnalyzer {
             Region region = new Region(regionNode, regionId++);
             ArrayList<Point> boundaryPoints = new ArrayList<>();
 
+            // Transfer edgy information from HashMap to region
+            if (edgyRegionMap.containsKey(regionNode)) {
+                ArrayList<MapEdgeContact> regionContacts = edgyRegionMap.get(regionNode);
+                region.isEdgy = true;
+                for (MapEdgeContact contact : regionContacts) {
+                    region.addEdgeContact(contact);
+                }
+                System.out.println("  Region marked as EDGY with " + region.edgeContacts.size() + " edge contacts");
+            }
+
             // Find all chokepoints connected to this region
             ArrayList<Node> connectedChokepoints = new ArrayList<>();
             for (Node neighbor : regionNode.neighbours) {
@@ -1605,7 +1718,7 @@ public class ZKTerrainAnalyzer {
 
                         // Find the shortest path along the obstacle boundary
                         ArrayList<Point> pathSegment = findShortestPathAlongContour(
-                            obstacleContour, contact1.contactPoint, contact2.contactPoint, addedSegments
+                            obstacleContour, contact1.contactPoint, contact2.contactPoint, addedSegments, region
                         );
 
                         if (pathSegment != null && !pathSegment.isEmpty()) {
@@ -1886,9 +1999,45 @@ public class ZKTerrainAnalyzer {
     }
 
     private ArrayList<Point> findShortestPathAlongContour(
-            Contour contour, Point start, Point end, HashSet<String> addedSegments) {
+            Contour contour, Point start, Point end, HashSet<String> addedSegments, Region region) {
 
         ArrayList<Point> path = new ArrayList<>();
+
+        // Check if this is an edgy region and if both points are on map edges
+        if (region != null && region.isEdgy) {
+            // Check if start and end points are both edgy vertices
+            MapEdgeContact startContact = null;
+            MapEdgeContact endContact = null;
+            MapEdge commonEdge = null;
+
+            // Find map edge contacts for start and end points
+            for (MapEdgeContact contact : region.edgeContacts) {
+                if (contact.contactPoint.equals(start)) {
+                    startContact = contact;
+                }
+                if (contact.contactPoint.equals(end)) {
+                    endContact = contact;
+                }
+            }
+
+            // Check if both points are on the same map edge
+            if (startContact != null && endContact != null && startContact.edge == endContact.edge) {
+                commonEdge = startContact.edge;
+                System.out.println("      EDGY REGION: Both points on " + commonEdge + " edge - using map edge tracing");
+
+                // Use map edge tracing instead of contour tracing
+                ArrayList<Point> mapEdgePath = traceAlongMapEdge(start, end, commonEdge);
+                if (!mapEdgePath.isEmpty()) {
+                    System.out.println("      Generated map edge path with " + mapEdgePath.size() + " points");
+                    return mapEdgePath;
+                } else {
+                    System.out.println("      WARNING: Map edge tracing failed, falling back to contour tracing");
+                }
+            } else if (startContact != null || endContact != null) {
+                System.out.println("      EDGY REGION: One point on map edge, using hybrid tracing");
+                // TODO: Implement hybrid tracing (part contour, part map edge) if needed
+            }
+        }
 
         // Find indices of start and end points in the contour
         int startIndex = -1;
@@ -2181,6 +2330,36 @@ public class ZKTerrainAnalyzer {
         }
     }
 
+    // Helper class to represent a segment along a map edge
+    public static class MapEdgeSegment {
+        public Point start;
+        public Point end;
+        public MapEdge edge;
+        public ArrayList<Point> pathPoints;
+
+        public MapEdgeSegment(Point start, Point end, MapEdge edge) {
+            this.start = start;
+            this.end = end;
+            this.edge = edge;
+            this.pathPoints = new ArrayList<>();
+            generatePathPoints();
+        }
+
+        private void generatePathPoints() {
+            pathPoints.add(start);
+
+            // Generate intermediate points if necessary (for now, just connect directly)
+            // In the future, we might add more points for smoother curves around corners
+            if (!start.equals(end)) {
+                pathPoints.add(end);
+            }
+        }
+
+        public int getLength() {
+            return pathPoints.size();
+        }
+    }
+
     private void detectMapEdgeContacts() {
         System.out.println("Detecting map edge contacts...");
         mapEdgeContacts.clear();
@@ -2204,6 +2383,68 @@ public class ZKTerrainAnalyzer {
         detectChokepointMapEdgeContacts(rightEdge, MapEdge.RIGHT);
 
         System.out.println("Found " + mapEdgeContacts.size() + " map edge contacts");
+    }
+
+    private void markEdgyRegions(RegionGraph graph) {
+        System.out.println("Marking edgy regions based on map edge contacts...");
+        int edgyRegionCount = 0;
+
+        // For each region node, check if its connected features (chokepoints/obstacles) have map edge contacts
+        for (Node regionNode : graph.regionNodes) {
+            boolean isEdgy = false;
+            ArrayList<MapEdgeContact> regionContacts = new ArrayList<>();
+
+            // Check connected chokepoints for map edge contacts
+            for (Node neighbor : regionNode.neighbours) {
+                if (graph.chokepointNodes.contains(neighbor)) {
+                    // This is a connected chokepoint - check if it has map edge contacts
+                    for (MapEdgeContact contact : mapEdgeContacts) {
+                        if (contact.isChokepoint && contact.chokepointNode == neighbor) {
+                            regionContacts.add(contact);
+                            isEdgy = true;
+                        }
+                    }
+                }
+            }
+
+            // Check if any obstacles connected through chokepoints have map edge contacts
+            HashSet<Integer> connectedObstacles = new HashSet<>();
+            for (Node chokepointNode : regionNode.neighbours) {
+                if (graph.chokepointNodes.contains(chokepointNode)) {
+                    // Find the Chokepoint object for this node to get connected obstacles
+                    for (Chokepoint cp : graph.chokepoints) {
+                        if (cp.node == chokepointNode && cp.obstacleIds != null) {
+                            for (int obstacleId : cp.obstacleIds) {
+                                connectedObstacles.add(obstacleId);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Check if any connected obstacles have map edge contacts
+            for (MapEdgeContact contact : mapEdgeContacts) {
+                if (contact.isObstacle && connectedObstacles.contains(contact.obstacleId)) {
+                    regionContacts.add(contact);
+                    isEdgy = true;
+                }
+            }
+
+            // Find the Region object for this node in the regionList and mark as edgy
+            if (isEdgy) {
+                // Note: We need to create Region objects first, so we'll store this info
+                // and apply it when regions are created in buildRegionBoundariesFromChokepoints
+                System.out.println("  Region @" + regionNode.position + " is EDGY with " +
+                                 regionContacts.size() + " edge contacts");
+                edgyRegionCount++;
+
+                // Store the edgy status and contacts in the HashMap for later retrieval
+                edgyRegionMap.put(regionNode, regionContacts);
+            }
+        }
+
+        System.out.println("Marked " + edgyRegionCount + " regions as edgy");
     }
 
     private void detectObstacleMapEdgeContacts(Point[] mapEdge, MapEdge edge) {
