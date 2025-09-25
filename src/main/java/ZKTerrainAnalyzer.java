@@ -783,11 +783,25 @@ public class ZKTerrainAnalyzer {
         public int contourIndex;
         public int segmentIndex;
         public Contour contour;
+        public double length;
 
         public ContourSegmentInfo(int contourIndex, int segmentIndex, Contour contour) {
             this.contourIndex = contourIndex;
             this.segmentIndex = segmentIndex;
             this.contour = contour;
+            this.length = calculateSegmentLength();
+        }
+
+        private double calculateSegmentLength() {
+            Point[] segmentPoints = contour.getSegmentPoints(segmentIndex);
+            if (segmentPoints == null) {
+                return 0.0;
+            }
+            return distance(segmentPoints[0], segmentPoints[1]);
+        }
+
+        public double getLength() {
+            return length;
         }
     }
 
@@ -968,11 +982,26 @@ public class ZKTerrainAnalyzer {
                 ArrayList<Point> clockwisePath = traceInDirection(contour, startIndex, targetIndex, true);
                 ArrayList<Point> counterClockwisePath = traceInDirection(contour, startIndex, targetIndex, false);
 
-                // Return the shorter complete path
-                ArrayList<Point> chosenPath = (clockwisePath.size() <= counterClockwisePath.size()) ?
+                // Return the geometrically shorter path (by distance, not segment count)
+                double clockwiseDistance = calculatePathDistance(clockwisePath);
+                double counterClockwiseDistance = calculatePathDistance(counterClockwisePath);
+
+                // Debug logging for path selection
+                System.out.println("      Clockwise path: " + clockwisePath.size() + " points, distance = " + String.format("%.2f", clockwiseDistance));
+                System.out.println("      Counter-clockwise path: " + counterClockwisePath.size() + " points, distance = " + String.format("%.2f", counterClockwiseDistance));
+
+                ArrayList<Point> chosenPath = (clockwiseDistance <= counterClockwiseDistance) ?
                                              clockwisePath : counterClockwisePath;
 
-                System.out.println("      Traced " + (chosenPath.size() - 1) + " contour points");
+                String chosenDirection = (clockwiseDistance <= counterClockwiseDistance) ? "clockwise" : "counter-clockwise";
+                System.out.println("      Selected " + chosenDirection + " path (" + (chosenPath.size() - 1) + " segments)");
+
+                // Debug: show first few points of each path to verify they're different
+                if (clockwisePath.size() >= 2 && counterClockwisePath.size() >= 2) {
+                    System.out.println("      Clockwise starts: " + clockwisePath.get(0) + " -> " + clockwisePath.get(1));
+                    System.out.println("      Counter-clockwise starts: " + counterClockwisePath.get(0) + " -> " + counterClockwisePath.get(1));
+                }
+
                 return chosenPath;
             }
         }
@@ -982,6 +1011,19 @@ public class ZKTerrainAnalyzer {
         ArrayList<Point> fallbackPath = new ArrayList<>();
         fallbackPath.add(startPoint);
         return fallbackPath;
+    }
+
+    // Calculate the total geometric distance of a path by summing distances between consecutive points
+    private double calculatePathDistance(ArrayList<Point> path) {
+        if (path.size() < 2) {
+            return 0.0;
+        }
+
+        double totalDistance = 0.0;
+        for (int i = 0; i < path.size() - 1; i++) {
+            totalDistance += distance(path.get(i), path.get(i + 1));
+        }
+        return totalDistance;
     }
 
     private int findPointOnContour(Contour contour, Point targetPoint) {
@@ -1632,8 +1674,18 @@ public class ZKTerrainAnalyzer {
         }
         pathCCW.add(contour.points.get(endIndex));
 
-        // Choose the shorter path
-        ArrayList<Point> shortestPath = pathCW.size() <= pathCCW.size() ? pathCW : pathCCW;
+        // Choose the geometrically shorter path (by distance, not segment count)
+        double clockwiseDistance = calculatePathDistance(pathCW);
+        double counterClockwiseDistance = calculatePathDistance(pathCCW);
+
+        // Debug logging for path selection
+        System.out.println("      Clockwise path: " + pathCW.size() + " points, distance = " + String.format("%.2f", clockwiseDistance));
+        System.out.println("      Counter-clockwise path: " + pathCCW.size() + " points, distance = " + String.format("%.2f", counterClockwiseDistance));
+
+        ArrayList<Point> shortestPath = (clockwiseDistance <= counterClockwiseDistance) ? pathCW : pathCCW;
+
+        String chosenDirection = (clockwiseDistance <= counterClockwiseDistance) ? "clockwise" : "counter-clockwise";
+        System.out.println("      Selected " + chosenDirection + " path (" + (shortestPath.size() - 1) + " segments)");
 
         // Mark segments as added
         for (int i = 0; i < shortestPath.size() - 1; i++) {
