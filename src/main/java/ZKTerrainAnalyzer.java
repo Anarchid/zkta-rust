@@ -36,6 +36,7 @@ public class ZKTerrainAnalyzer {
     static int TOO_CLOSE_TO_OBSTACLE = 15; // Adjusted for proper segment distance calculation
     ArrayList<Edge> pruned;
     RTree<Integer, Line> simplifiedLabelTree;  // R-tree with simplified geometry
+    ArrayList<JaggedSegment> jaggedSegments;   // Stores debug info for jagged boundary segments
 
     ZKTerrainAnalyzer(BufferedImage img){
         width = img.getWidth();
@@ -48,6 +49,7 @@ public class ZKTerrainAnalyzer {
         labelMap = new int[height][width];
         labelTree = RTree.create();
         holes = new ArrayList<>();
+        jaggedSegments = new ArrayList<>();
         regionList = new ArrayList<>();
         chokepointList = new ArrayList<>();
         fullContours = traceContours();
@@ -95,6 +97,10 @@ public class ZKTerrainAnalyzer {
 
     public ArrayList<Region> getRegionList(){
         return regionList;
+    }
+
+    public ArrayList<JaggedSegment> getJaggedSegments(){
+        return jaggedSegments;
     }
 
     public Point[] getChokepointSegments(Node chokepoint){
@@ -653,11 +659,7 @@ public class ZKTerrainAnalyzer {
                 }
             }
 
-            if (connectedChokepoints.isEmpty()) {
-                System.out.println("  Region has no connected chokepoints - isolated region");
-                // Create a simple circular boundary for isolated regions
-                region.setPolygon(createCircularBoundary(regionNode));
-            } else {
+            if (!connectedChokepoints.isEmpty()) {
                 System.out.println("  Region has " + connectedChokepoints.size() + " connected chokepoints");
 
                 // Start counterclockwise tracing from the first chokepoint
@@ -668,8 +670,8 @@ public class ZKTerrainAnalyzer {
                     region.setPolygon(boundaryPoints);
                     System.out.println("  Traced boundary with " + boundaryPoints.size() + " points");
                 } else {
-                    System.out.println("  Failed to trace boundary - using circular fallback");
-                    region.setPolygon(createCircularBoundary(regionNode));
+                    System.out.println("  Failed to trace boundary - skipping region");
+                    continue;
                 }
             }
 
@@ -677,23 +679,6 @@ public class ZKTerrainAnalyzer {
         }
     }
 
-    private ArrayList<Point> createCircularBoundary(Node regionNode) {
-        ArrayList<Point> points = new ArrayList<>();
-        double radius = Math.max(20.0, regionNode.radius * 0.6);
-        int numPoints = 12;
-
-        for (int i = 0; i < numPoints; i++) {
-            double angle = (2 * Math.PI * i) / numPoints;
-            int x = (int) (regionNode.position.x + radius * Math.cos(angle));
-            int y = (int) (regionNode.position.y + radius * Math.sin(angle));
-
-            x = Math.max(0, Math.min(width - 1, x));
-            y = Math.max(0, Math.min(height - 1, y));
-
-            points.add(new Point(x, y));
-        }
-        return points;
-    }
 
     private ArrayList<Point> traceBoundaryFromChokepoint(Node regionNode, Node startChokepoint, HashMap<Node, Point[]> chokepointCrossings) {
         ArrayList<Point> boundaryPoints = new ArrayList<>();
@@ -1458,11 +1443,8 @@ public class ZKTerrainAnalyzer {
             }
 
             if (connectedChokepoints.isEmpty()) {
-                // Isolated region with no chokepoints - create circular boundary
-                System.out.println("  Isolated region - creating circular boundary");
-                region.setPolygon(createCircularBoundary(regionNode));
-                region.isClosed = true;  // Circular boundaries are always closed
-                regionList.add(region);
+                // Isolated region with no chokepoints - skip for now
+                System.out.println("  Isolated region - skipping (no boundary generation)");
                 continue;
             }
 
@@ -1574,17 +1556,18 @@ public class ZKTerrainAnalyzer {
                 System.out.println("  Generated region boundary with " + sortedBoundary.size() +
                                  " points (" + (isClosed ? "CLOSED" : "OPEN") + ")");
             } else {
-                // Fallback to circular boundary if no valid path found
-                System.out.println("  No valid boundary paths found - using circular fallback");
-                ArrayList<Point> circularBoundary = createCircularBoundary(regionNode);
-                region.setPolygon(circularBoundary);
-                region.isClosed = true;  // Circular boundaries are always closed
+                // No valid boundary paths found - skip this region
+                System.out.println("  No valid boundary paths found - skipping region");
+                continue;
             }
 
             regionList.add(region);
         }
 
         System.out.println("\nGenerated boundaries for " + regionList.size() + " regions");
+
+        // Run diagnostic on region boundaries to identify jagged segments
+        diagnoseBoundarySegments(graph);
     }
 
     private void testObstacleContourClosedness() {
@@ -1626,6 +1609,171 @@ public class ZKTerrainAnalyzer {
             }
         }
         System.out.println("=== End Obstacle Contour Test ===\n");
+    }
+
+    private void diagnoseBoundarySegments(RegionGraph graph) {
+        System.out.println("\n=== BOUNDARY SEGMENT DIAGNOSTICS ===");
+
+        // Clear previous jagged segments
+        jaggedSegments.clear();
+
+        System.out.println("Using strict exact-match validation for segment analysis...");
+
+        int totalSegments = 0;
+        int validSegments = 0;
+        int jaggedSegments = 0;
+
+        // Check each region's boundary segments
+        for (int regionIndex = 0; regionIndex < regionList.size(); regionIndex++) {
+            Region region = regionList.get(regionIndex);
+            ArrayList<Point> boundary = region.polygon;
+
+            if (boundary == null || boundary.size() < 2) {
+                continue;
+            }
+
+            System.out.println("\nRegion R" + region.id + " @" + region.seedNode.position + ":");
+            System.out.println("  Boundary has " + boundary.size() + " points, " + (boundary.size() - 1) + " segments");
+
+            ArrayList<String> jaggedSegmentsList = new ArrayList<>();
+            int regionJaggedCount = 0;
+
+            for (int i = 0; i < boundary.size() - 1; i++) {
+                Point p1 = boundary.get(i);
+                Point p2 = boundary.get(i + 1);
+                String segmentKey = createSegmentKey(p1, p2);
+
+                totalSegments++;
+
+                boolean isChokepointSegment = isValidChokepointSegment(p1, p2, graph);
+                boolean isObstacleSegment = isValidObstacleSegment(p1, p2);
+
+                String validationType = "";
+                if (isChokepointSegment) {
+                    validSegments++;
+                    validationType = "chokepoint";
+                    System.out.println("      VALID (chokepoint): " + p1 + " -> " + p2 + " (length=" + String.format("%.1f", distance(p1, p2)) + ")");
+                } else if (isObstacleSegment) {
+                    validSegments++;
+                    validationType = "obstacle";
+                    System.out.println("      VALID (obstacle): " + p1 + " -> " + p2 + " (length=" + String.format("%.1f", distance(p1, p2)) + ")");
+                } else {
+                    jaggedSegments++;
+                    regionJaggedCount++;
+                    double segmentLength = distance(p1, p2);
+
+                    String jaggedId = "R" + region.id + ".J" + regionJaggedCount;
+                    jaggedSegmentsList.add(jaggedId + ": " + p1 + " -> " + p2 + " (length=" + String.format("%.1f", segmentLength) + ")");
+
+                    // Store for visualization (using red color)
+                    this.jaggedSegments.add(new JaggedSegment(p1, p2, region.id, jaggedId, Color.RED));
+
+                    // Debug logging for jagged segments
+                    System.out.println("      JAGGED " + jaggedId + ": " + p1 + " -> " + p2 + " (length=" + String.format("%.1f", segmentLength) + ")");
+                }
+            }
+
+            if (!jaggedSegmentsList.isEmpty()) {
+                System.out.println("  *** JAGGED SEGMENTS DETECTED (" + jaggedSegmentsList.size() + ") ***:");
+                for (String jaggedSegment : jaggedSegmentsList) {
+                    System.out.println("    " + jaggedSegment);
+                }
+            } else {
+                System.out.println("  All segments are valid (chokepoint or obstacle segments)");
+            }
+        }
+
+        System.out.println("\n=== DIAGNOSTIC SUMMARY ===");
+        System.out.println("Total boundary segments: " + totalSegments);
+        System.out.println("Valid segments: " + validSegments + " (" + String.format("%.1f", 100.0 * validSegments / totalSegments) + "%)");
+        System.out.println("Jagged segments: " + jaggedSegments + " (" + String.format("%.1f", 100.0 * jaggedSegments / totalSegments) + "%)");
+        System.out.println("=== END DIAGNOSTICS ===\n");
+    }
+
+    // Enhanced chokepoint segment validation - checks if segment contains chokepoint crossing points
+    private boolean isValidChokepointSegment(Point p1, Point p2, RegionGraph graph) {
+        // Use strict exact matching for chokepoint segments
+        for (Chokepoint chokepoint : graph.chokepoints) {
+            if (chokepoint.crossingPoints != null && chokepoint.crossingPoints.length >= 2) {
+                Point cp1 = chokepoint.crossingPoints[0];
+                Point cp2 = chokepoint.crossingPoints[1];
+
+                // Check if the segment is exactly the chokepoint segment (either direction)
+                if ((p1.equals(cp1) && p2.equals(cp2)) || (p1.equals(cp2) && p2.equals(cp1))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Strict obstacle segment validation - only exact matches
+    private boolean isValidObstacleSegment(Point p1, Point p2) {
+        ArrayList<Contour> contours = getSimplifiedContours();
+
+        // Check if this segment is a direct obstacle segment (exact match only)
+        for (Contour contour : contours) {
+            for (int i = 0; i < contour.length(); i++) {
+                Point cp1 = contour.getPoint(i);
+                Point cp2 = contour.getPoint((i + 1) % contour.length());
+
+                if ((p1.equals(cp1) && p2.equals(cp2)) || (p1.equals(cp2) && p2.equals(cp1))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Check if a segment follows a path along a contour (spanning multiple contour segments)
+    private boolean segmentFollowsContourPath(Point segStart, Point segEnd, Contour contour) {
+        double tolerance = 2.0;
+
+        // Find starting point on contour
+        int startIndex = -1;
+        for (int i = 0; i < contour.length(); i++) {
+            Point cp = contour.getPoint(i);
+            if (distance(segStart, cp) <= tolerance) {
+                startIndex = i;
+                break;
+            }
+        }
+
+        if (startIndex == -1) return false;
+
+        // Trace along contour to see if we reach the end point
+        double maxDistance = distance(segStart, segEnd) * 1.5; // Allow some slack
+        double accumulatedDistance = 0;
+
+        // Try both directions
+        for (boolean clockwise : new boolean[]{true, false}) {
+            accumulatedDistance = 0;
+            int current = startIndex;
+
+            for (int steps = 0; steps < contour.length() && accumulatedDistance < maxDistance; steps++) {
+                Point currentPoint = contour.getPoint(current);
+
+                // Check if we've reached the end point
+                if (distance(segEnd, currentPoint) <= tolerance) {
+                    // Verify the accumulated path distance is reasonable
+                    double directDistance = distance(segStart, segEnd);
+                    if (accumulatedDistance <= directDistance * 2.0) { // Path shouldn't be too winding
+                        return true;
+                    }
+                }
+
+                // Move to next point
+                int next = clockwise ? (current + 1) % contour.length()
+                                    : (current - 1 + contour.length()) % contour.length();
+
+                if (steps > 0) { // Don't add distance for the first step
+                    accumulatedDistance += distance(contour.getPoint(current), contour.getPoint(next));
+                }
+                current = next;
+            }
+        }
+
+        return false;
     }
 
     private ArrayList<Point> findShortestPathAlongContour(
@@ -1782,6 +1930,26 @@ public class ZKTerrainAnalyzer {
         }
 
         return visited.size() >= expectedSize;
+    }
+
+    // Helper class to store jagged segment information for debug visualization
+    public static class JaggedSegment {
+        public Point start;
+        public Point end;
+        public int regionId;
+        public String identifier;
+        public Color regionColor;
+        public double length;
+
+        public JaggedSegment(Point start, Point end, int regionId, String identifier, Color regionColor) {
+            this.start = start;
+            this.end = end;
+            this.regionId = regionId;
+            this.identifier = identifier;
+            this.regionColor = regionColor;
+            this.length = Math.sqrt((end.x - start.x) * (end.x - start.x) +
+                                   (end.y - start.y) * (end.y - start.y));
+        }
     }
 
     // Helper class to store chokepoint contact information

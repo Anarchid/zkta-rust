@@ -308,6 +308,32 @@ public class ZKTAWindow {
 
             System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
+            // Draw jagged segments for debugging
+            ArrayList<ZKTerrainAnalyzer.JaggedSegment> jaggedSegments = zkta.getJaggedSegments();
+            if (!jaggedSegments.isEmpty()) {
+                // Set up double thick dashed red line
+                g2d.setColor(Color.RED);
+                float[] dashPattern = {8.0f, 4.0f}; // 8 pixel dash, 4 pixel gap
+                g2d.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_BUTT,
+                                           BasicStroke.JOIN_MITER, 10.0f, dashPattern, 0.0f));
+
+                for (ZKTerrainAnalyzer.JaggedSegment segment : jaggedSegments) {
+                    g2d.drawLine(segment.start.x, segment.start.y, segment.end.x, segment.end.y);
+
+                    // Draw identifier label at midpoint of segment
+                    int midX = (segment.start.x + segment.end.x) / 2;
+                    int midY = (segment.start.y + segment.end.y) / 2;
+                    g2d.setColor(Color.WHITE);
+                    g2d.fillRect(midX - 15, midY - 8, 30, 16);
+                    g2d.setColor(Color.RED);
+                    g2d.drawString(segment.identifier, midX - 12, midY + 4);
+                }
+
+                // Reset stroke
+                g2d.setStroke(new BasicStroke(1.0f));
+                System.out.println("Drew " + jaggedSegments.size() + " jagged debug segments");
+            }
+
             bg.setColor(Color.YELLOW);
             for(int i = 0; i < simple.size();i++){
                 Contour contour = simple.get(i);
