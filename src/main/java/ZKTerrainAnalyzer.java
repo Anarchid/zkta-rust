@@ -715,9 +715,13 @@ public class ZKTerrainAnalyzer {
                     obstacle1 = obstacle;
                 } else if (!obstacle.equals(obstacle1) && !closestPoint.equals(closest1) && (closest2 == null || dist < minDist2)) {
                     // Different obstacle than the first one, different point than first, and closer than current second closest
-                    closest2 = closestPoint;
-                    minDist2 = dist;
-                    obstacle2 = obstacle;
+                    // Also check that the crossing points are sufficiently far apart (at least one chokepoint radius)
+                    double crossingDistance = distance(closest1, closestPoint);
+                    if (crossingDistance >= chokepoint.radius) {
+                        closest2 = closestPoint;
+                        minDist2 = dist;
+                        obstacle2 = obstacle;
+                    }
                 }
             }
 
@@ -735,7 +739,8 @@ public class ZKTerrainAnalyzer {
             } else if (closest1 != null) {
                 System.out.println("DEBUG: Chokepoint @" + chokepoint.position + " (r=" + String.format("%.1f", chokepoint.radius) +
                                  ") found only one obstacle point: " + closest1 + " (dist=" + String.format("%.1f", minDist1) +
-                                 ") from " + obstacleCount + " obstacles searched");
+                                 ") from " + obstacleCount + " obstacles searched" +
+                                 " (other crossing points may have been too close)");
             } else {
                 System.out.println("DEBUG: Chokepoint @" + chokepoint.position + " (r=" + String.format("%.1f", chokepoint.radius) +
                                  ") found NO obstacle points from " + obstacleCount + " obstacles searched (search radius=" +
