@@ -168,6 +168,12 @@ public class ZKTAWindow {
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
             }
 
+            // Draw chokepoint nodes in red
+            bg.setColor(Color.RED);
+            for(Node n:r.chokepointNodes){
+                bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
+            }
+
             bg.setColor(Color.YELLOW);
             for(int i = 0; i < simple.size();i++){
                 Contour contour = simple.get(i);

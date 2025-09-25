@@ -51,6 +51,8 @@ public class ZKTerrainAnalyzer {
         pruned = getPrunedEdges(voronoid);
         labelTree = createRTree();
         regions = pruneGraph(convertGraph(voronoid.get_graph_reference()));
+        calculateNodeRadii(regions);
+        identifyRegionsAndChokepoints(regions);
     }
 
     public int[][] getLabelMap(){
@@ -103,85 +105,128 @@ public class ZKTerrainAnalyzer {
         return distanceToLine(n.position, l);
     }
 
+    private void calculateNodeRadii(RegionGraph graph) {
+        System.out.println("Calculating radius (distance to obstacle) for all nodes...");
+        for (Node n : graph.nodes) {
+            n.radius = getDistanceToObstacle(n);
+        }
+        System.out.println("Completed radius calculation for " + graph.nodes.size() + " nodes");
+    }
+
     private RegionGraph pruneGraph(RegionGraph graph)
     {
-        // Mark all nodes with degree != 2 as region candidates BEFORE pruning
-        int regionCandidates = 0;
-        for(Node n : graph.nodes) {
-            int degree = n.neighbours.size();
-            if(degree != 2) {
-                System.out.println("Marking node @" + n.position + " as region (degree=" + degree + ")");
-                graph.setNodeAsRegion(n);
-                regionCandidates++;
-            }
-        }
-        System.out.println("Found "+regionCandidates+" region candidate nodes (degree != 2) before pruning");
-
-        // get the list of all leafs (nodes with only one element in the adjacent list)
-        LinkedList<Node> nodeToPrune = new LinkedList<>();
-        for(Node n:graph.nodes){
-            if(n.neighbours.size() == 1){
-                nodeToPrune.add(n);
-            }
-        }
-
-        System.out.println("Beginning region discovery with "+nodeToPrune.size()+" leaf nodes");
+        // First: Remove nodes that are too close to obstacles
+        System.out.println("Pruning nodes too close to obstacles...");
         int removed = 0;
+        ArrayList<Node> nodesToRemove = new ArrayList<>();
 
-        // using leafs as starting points, prune the RegionGraph
-        while (!nodeToPrune.isEmpty()) {
-            // pop first element
-            Node n0 = nodeToPrune.poll();
-
-            // keep isolated nodes
-            if (n0.neighbours.isEmpty())  continue;
-
-            System.out.println("processing node @"+n0.position);
-
-            Node n1 = n0.neighbours.iterator().next();
-
-            // find distance to nearest obstacle
-            double dist_0 = getDistanceToObstacle(n0);
-            System.out.println("Distance to obstacle: "+dist_0);
-            double dist_1 = 0;
-            boolean deleted = false;
-            if(dist_0 < TOO_CLOSE_TO_OBSTACLE){
-                System.out.println("Too close, removing!");
-                removed++;
-                deleted = true;
-                graph.removeNode(n0);
-            }else{
-                dist_1 = getDistanceToObstacle(n1);
-                System.out.println("Parent node distance to obstacle: "+dist_1);
-                // Only remove if significantly closer to obstacle than parent AND parent is not too close
-                if(dist_0 - 0.9 < dist_1 && dist_1 > TOO_CLOSE_TO_OBSTACLE){
-                    System.out.println("Parent is farther from obstacle - removing!");
-                    deleted = true;
-                    removed++;
-                    graph.removeNode(n0);
-                } else {
-                    deleted = false; // Don't remove this node
-                }
-            }
-
-            if(deleted){
-                System.out.println("parent now has degree "+n1.neighbours.size());
-                if (n1.neighbours.isEmpty() &&  dist_1 > TOO_CLOSE_TO_OBSTACLE) {
-                    // isolated node
-                    graph.setNodeAsRegion(n1);
-                    System.out.println("marked parent as region");
-
-                } else if (n1.neighbours.size() == 1) { // keep pruning if only one child
-                    System.out.println("queued parent for processing");
-                    nodeToPrune.add(n1);
-                }
+        for (Node n : graph.nodes) {
+            double dist = getDistanceToObstacle(n);
+            if (dist < TOO_CLOSE_TO_OBSTACLE) {
+                nodesToRemove.add(n);
             }
         }
-        System.out.println("Total nodes removed during discovery "+removed);
-        System.out.println("Total nodes retained during discovery: "+graph.nodes.size());
-        System.out.println("Total region nodes after pruning: " + graph.regionNodes.size());
+
+        for (Node n : nodesToRemove) {
+            graph.removeNode(n);
+            removed++;
+        }
+
+        System.out.println("Removed " + removed + " nodes too close to obstacles");
+        System.out.println("Remaining nodes: " + graph.nodes.size());
 
         return graph;
+    }
+
+    private void identifyRegionsAndChokepoints(RegionGraph graph) {
+        System.out.println("Starting BWTA2 region and chokepoint identification...");
+
+        // Reset all visited flags and parent references
+        for (Node n : graph.nodes) {
+            n.visited = false;
+            n.parent = null;
+        }
+
+        // Find all leaf nodes (degree = 1) to start BFS traversal
+        Queue<Node> toProcess = new LinkedList<>();
+        for (Node n : graph.nodes) {
+            if (n.neighbours.size() == 1) {
+                toProcess.add(n);
+                // Mark leaf nodes as regions (they are local maxima after pruning)
+                graph.setNodeAsRegion(n);
+                n.visited = true;
+                System.out.println("Leaf node @" + n.position + " marked as region (radius=" + n.radius + ")");
+            }
+        }
+
+        System.out.println("Starting BFS from " + toProcess.size() + " leaf nodes");
+
+        // BFS traversal implementing BWTA2 algorithm
+        while (!toProcess.isEmpty()) {
+            Node current = toProcess.poll();
+
+            // Add unvisited neighbors to the queue and mark them immediately
+            for (Node neighbor : current.neighbours) {
+                if (!neighbor.visited) {
+                    neighbor.visited = true;
+                    neighbor.parent = current;
+                    toProcess.add(neighbor);
+
+                    int degree = neighbor.neighbours.size();
+
+                    // Apply BWTA2 rules - each node is processed exactly once
+                    if (degree != 2) {
+                        // Degree != 2: mark as region (leaf or intersection)
+                        graph.setNodeAsRegion(neighbor);
+                    } else {
+                        // Degree = 2: apply local maxima/minima rules
+                        if (neighbor.isLocalMinimum()) {
+                            // Local minimum with degree 2
+                            if (current.isLocalMinimum()) {
+                                // Both neighbor and parent are local minima
+                                // Mark the one with smallest radius as chokepoint
+                                if (neighbor.radius < current.radius) {
+                                    graph.setNodeAsChokepoint(neighbor);
+                                }
+                                // else: parent has smaller radius, so neighbor remains unmarked
+                            } else {
+                                // Only neighbor is local minimum
+                                graph.setNodeAsChokepoint(neighbor);
+                            }
+                        } else if (neighbor.isLocalMaximum()) {
+                            // Local maximum with degree 2
+                            if (current.isLocalMaximum()) {
+                                // Both neighbor and parent are local maxima
+                                // Mark the one with biggest radius as region
+                                if (neighbor.radius > current.radius) {
+                                    graph.setNodeAsRegion(neighbor);
+                                }
+                                // else: parent has bigger radius, so neighbor remains unmarked
+                            } else {
+                                // Only neighbor is local maximum
+                                graph.setNodeAsRegion(neighbor);
+                            }
+                        }
+                        // If neither local min nor max, leave unmarked
+                    }
+                }
+            }
+        }
+
+        // Verify no nodes are marked as both regions and chokepoints
+        int dualMarked = 0;
+        for (Node n : graph.nodes) {
+            if (graph.regionNodes.contains(n) && graph.chokepointNodes.contains(n)) {
+                System.out.println("ERROR: Node @" + n.position + " is marked as both region and chokepoint!");
+                dualMarked++;
+            }
+        }
+
+        System.out.println("BWTA2 identification complete:");
+        System.out.println("- Regions: " + graph.regionNodes.size());
+        System.out.println("- Chokepoints: " + graph.chokepointNodes.size());
+        System.out.println("- Dual-marked nodes: " + dualMarked);
+        System.out.println("- Unmarked nodes: " + (graph.nodes.size() - graph.regionNodes.size() - graph.chokepointNodes.size()));
     }
 
     private RegionGraph convertGraph(HalfEdgeDiagram g){
