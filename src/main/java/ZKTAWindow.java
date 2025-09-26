@@ -11,6 +11,7 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Random;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -199,11 +200,106 @@ public class ZKTAWindow {
             bg.setColor(Color.MAGENTA);
             ArrayList<ZKTerrainAnalyzer.MapEdgeContact> mapContacts = zkta.getMapEdgeContacts();
             for (ZKTerrainAnalyzer.MapEdgeContact contact : mapContacts) {
-                bg.fillOval(contact.contactPoint.x - 3, contact.contactPoint.y - 3, 6, 6);
+                if (contact.visited) {
+                    // Draw visited contacts with double radius (bright magenta)
+                    bg.setColor(new Color(255, 0, 255)); // Bright magenta
+                    bg.fillOval(contact.contactPoint.x - 6, contact.contactPoint.y - 6, 12, 12);
+                } else {
+                    // Draw unvisited contacts with normal radius (darker magenta)
+                    bg.setColor(new Color(128, 0, 128)); // Darker magenta
+                    bg.fillOval(contact.contactPoint.x - 3, contact.contactPoint.y - 3, 6, 6);
+                }
             }
 
-            // Draw inscribed circles for regions with low-opacity teal
+            // Draw edge segments in bright cyan
             Graphics2D g2d = (Graphics2D) bg;
+            ArrayList<ZKTerrainAnalyzer.EdgeSegment> edgeSegments = zkta.getEdgeSegments();
+            g2d.setColor(Color.CYAN);
+            g2d.setStroke(new BasicStroke(2.0f));
+
+            for (ZKTerrainAnalyzer.EdgeSegment segment : edgeSegments) {
+                // Draw the full segment in cyan
+                g2d.drawLine(segment.start.x, segment.start.y, segment.end.x, segment.end.y);
+
+                // Draw perpendicular gray notches at the segment endpoints to show joints
+                g2d.setColor(Color.GRAY);
+                g2d.setStroke(new BasicStroke(1.0f));
+
+                double dx = segment.end.x - segment.start.x;
+                double dy = segment.end.y - segment.start.y;
+                double length = Math.sqrt(dx * dx + dy * dy);
+
+                if (length > 0) {
+                    // Unit vector along the segment
+                    double unitX = dx / length;
+                    double unitY = dy / length;
+                    // Perpendicular vector (rotate 90 degrees)
+                    double perpX = -unitY;
+                    double perpY = unitX;
+
+                    int notchLength = 4;
+
+                    // Draw notch at start point
+                    int startNotchX1 = segment.start.x - (int)(notchLength * perpX / 2);
+                    int startNotchY1 = segment.start.y - (int)(notchLength * perpY / 2);
+                    int startNotchX2 = segment.start.x + (int)(notchLength * perpX / 2);
+                    int startNotchY2 = segment.start.y + (int)(notchLength * perpY / 2);
+                    g2d.drawLine(startNotchX1, startNotchY1, startNotchX2, startNotchY2);
+
+                    // Draw notch at end point
+                    int endNotchX1 = segment.end.x - (int)(notchLength * perpX / 2);
+                    int endNotchY1 = segment.end.y - (int)(notchLength * perpY / 2);
+                    int endNotchX2 = segment.end.x + (int)(notchLength * perpX / 2);
+                    int endNotchY2 = segment.end.y + (int)(notchLength * perpY / 2);
+                    g2d.drawLine(endNotchX1, endNotchY1, endNotchX2, endNotchY2);
+                }
+
+                // Reset to cyan and thick stroke for next segment
+                g2d.setColor(Color.CYAN);
+                g2d.setStroke(new BasicStroke(2.0f));
+            }
+
+            // Reset stroke
+            g2d.setStroke(new BasicStroke(1.0f));
+
+            // Debug: Draw incomplete/failed region boundaries
+
+            ArrayList<Region> regions = zkta.getRegionList();
+            for (Region region : regions) {
+                // Skip closed regions - let the fill system handle those
+                if (region.isClosed) {
+                    continue;
+                }
+
+                // Generate a unique color for this region (using same approach as fill system)
+                Random regionRandom = new Random(region.id); // Seed with region ID for consistency
+                float hue = regionRandom.nextFloat();
+                float saturation = 0.7f + regionRandom.nextFloat() * 0.3f; // 70-100% saturation
+                float brightness = 0.8f + regionRandom.nextFloat() * 0.2f; // 80-100% brightness
+                Color regionColor = Color.getHSBColor(hue, saturation, brightness);
+                g2d.setColor(regionColor);
+
+                if (region.partialSegments != null && !region.partialSegments.isEmpty()) {
+                    // Draw partial boundary segments with dashed lines
+                    float[] dashPattern = {8.0f, 4.0f}; // 8 pixel dash, 4 pixel gap
+                    g2d.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_BUTT,
+                                                BasicStroke.JOIN_MITER, 10.0f, dashPattern, 0.0f));
+
+                    // Draw each disconnected segment separately
+                    for (ArrayList<Point> segment : region.partialSegments) {
+                        for (int i = 0; i < segment.size() - 1; i++) {
+                            Point p1 = segment.get(i);
+                            Point p2 = segment.get(i + 1);
+                            g2d.drawLine(p1.x, p1.y, p2.x, p2.y);
+                        }
+                    }
+                }
+            }
+
+            // Reset stroke to solid
+            g2d.setStroke(new BasicStroke(1.0f));
+
+            // Draw inscribed circles for regions with low-opacity teal
             g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.2f)); // 20% opacity
             g2d.setColor(new Color(64, 224, 208)); // Turquoise
             for(Node n:r.regionNodes){
@@ -295,9 +391,9 @@ public class ZKTAWindow {
                     } else {
                         // Draw dashed boundary for open regions
                         g2d.setColor(regionColor);
-                        float[] dashPattern = {5.0f, 3.0f}; // 5 pixel dash, 3 pixel gap
+                        float[] openRegionDashPattern = {5.0f, 3.0f}; // 5 pixel dash, 3 pixel gap
                         g2d.setStroke(new BasicStroke(1.0f, BasicStroke.CAP_BUTT,
-                                                     BasicStroke.JOIN_MITER, 10.0f, dashPattern, 0.0f));
+                                                     BasicStroke.JOIN_MITER, 10.0f, openRegionDashPattern, 0.0f));
 
                         // Draw the polyline segments
                         for (int i = 0; i < region.polygon.size() - 1; i++) {
@@ -315,14 +411,57 @@ public class ZKTAWindow {
 
             System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
+            // Draw incomplete region boundaries for debugging
+            int incompleteCount = 0;
+            for (Region region : zkta.getRegionList()) {
+                if (!region.isClosed && region.polygon != null && region.polygon.size() >= 2) {
+                    // Alternate colors: odd regions = dashed red, even regions = dashed turquoise
+                    Color debugColor = (region.id % 2 == 1) ? Color.RED : Color.CYAN;
+                    g2d.setColor(debugColor);
+
+                    // Set up dashed line
+                    float[] incompleteBoundaryDashPattern = {6.0f, 6.0f}; // 6 pixel dash, 6 pixel gap
+                    g2d.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_BUTT,
+                                               BasicStroke.JOIN_MITER, 10.0f, incompleteBoundaryDashPattern, 0.0f));
+
+                    // Draw the incomplete boundary segments
+                    if (region.partialSegments != null && !region.partialSegments.isEmpty()) {
+                        for (ArrayList<Point> segment : region.partialSegments) {
+                            for (int i = 0; i < segment.size() - 1; i++) {
+                                Point p1 = segment.get(i);
+                                Point p2 = segment.get(i + 1);
+                                g2d.drawLine(p1.x, p1.y, p2.x, p2.y);
+                            }
+                        }
+                    }
+
+                    // Draw region ID at centroid
+                    Point centroid = region.getCenter();
+                    g2d.setColor(Color.WHITE);
+                    g2d.fillRect(centroid.x - 10, centroid.y - 8, 20, 16);
+                    g2d.setColor(debugColor);
+                    g2d.setFont(new Font("Arial", Font.BOLD, 10));
+                    g2d.drawString("R" + region.id, centroid.x - 8, centroid.y + 3);
+
+                    incompleteCount++;
+                }
+            }
+
+            // Reset stroke to solid
+            g2d.setStroke(new BasicStroke(1.0f));
+
+            if (incompleteCount > 0) {
+                System.out.println("Drew " + incompleteCount + " incomplete region boundaries for debugging");
+            }
+
             // Draw jagged segments for debugging
             ArrayList<ZKTerrainAnalyzer.JaggedSegment> jaggedSegments = zkta.getJaggedSegments();
             if (!jaggedSegments.isEmpty()) {
                 // Set up double thick dashed red line
                 g2d.setColor(Color.RED);
-                float[] dashPattern = {8.0f, 4.0f}; // 8 pixel dash, 4 pixel gap
+                float[] jaggedSegmentDashPattern = {8.0f, 4.0f}; // 8 pixel dash, 4 pixel gap
                 g2d.setStroke(new BasicStroke(3.0f, BasicStroke.CAP_BUTT,
-                                           BasicStroke.JOIN_MITER, 10.0f, dashPattern, 0.0f));
+                                           BasicStroke.JOIN_MITER, 10.0f, jaggedSegmentDashPattern, 0.0f));
 
                 for (ZKTerrainAnalyzer.JaggedSegment segment : jaggedSegments) {
                     g2d.drawLine(segment.start.x, segment.start.y, segment.end.x, segment.end.y);
