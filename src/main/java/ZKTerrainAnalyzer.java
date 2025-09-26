@@ -29,6 +29,7 @@ public class ZKTerrainAnalyzer {
     ArrayList<Chokepoint> chokepointList;
     ArrayList<MapEdgeContact> mapEdgeContacts;
     HashMap<Node, ArrayList<MapEdgeContact>> edgyRegionMap; // Maps region nodes to their edge contacts
+    HashMap<Integer, ArrayList<Point>> edgeContactSplitPoints; // Maps contour index to edge contact split points
     double v_width;
     double v_height;
     double radius;
@@ -59,6 +60,7 @@ public class ZKTerrainAnalyzer {
         chokepointList = new ArrayList<>();
         mapEdgeContacts = new ArrayList<>();
         edgyRegionMap = new HashMap<>();
+        edgeContactSplitPoints = new HashMap<>();
         fullContours = traceContours();
         simplifiedContours = simplifyContours();
         voronoid = generateVoronoi((ArrayList<Contour>)simplifiedContours.clone());
@@ -85,11 +87,14 @@ public class ZKTerrainAnalyzer {
         calculateNodeRadii(regions);
         // extractRegionPolygons(regions);  // Disabled for now - WIP region detection
 
-        // Instead, split obstacle segments at chokepoint contact points
+        // Detect and split obstacle segments at map edge contacts BEFORE chokepoint processing
+        detectMapEdgeContacts();
+
+        // Split obstacle segments at chokepoint contact points
         splitObstacleSegmentsAtChokepointContacts(regions);
 
-        // Detect map edge contacts for obstacles and chokepoints
-        detectMapEdgeContacts();
+        // Now detect chokepoint edge contacts and edge segment endpoints
+        detectChokepointAndEdgeSegmentContacts();
 
         // Debug: Split edge segments at chokepoint contact points
         splitDebugSegmentsAtChokepoints();
@@ -99,6 +104,9 @@ public class ZKTerrainAnalyzer {
 
         // Build region boundaries from chokepoint contacts
         buildRegionBoundariesFromChokepoints(regions);
+
+        // TODO: Build improved region boundaries using edge segments
+        // buildImprovedRegionBoundaries(regions);
 
         // Test: Check if obstacle contours themselves are properly identified as closed
         testObstacleContourClosedness();
@@ -2154,6 +2162,503 @@ public class ZKTerrainAnalyzer {
     }
 
 
+    // Helper class for BFS boundary tracing
+    private static class BoundaryVertex {
+        Point position;
+        VertexType type;
+        Object source;  // Can be Chokepoint, MapEdgeContact, or obstacle segment
+        Set<BoundaryVertex> neighbors;
+
+        enum VertexType {
+            CHOKEPOINT_CONTACT,  // Contact point on obstacle from chokepoint
+            EDGE_CONTACT,        // Contact point on map edge
+            OBSTACLE_VERTEX      // Vertex on obstacle contour
+        }
+
+        BoundaryVertex(Point position, VertexType type, Object source) {
+            this.position = position;
+            this.type = type;
+            this.source = source;
+            this.neighbors = new HashSet<>();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            BoundaryVertex that = (BoundaryVertex) o;
+            return position.equals(that.position);
+        }
+
+        @Override
+        public int hashCode() {
+            return position.hashCode();
+        }
+    }
+
+    private void buildImprovedRegionBoundaries(RegionGraph graph) {
+        System.out.println("Building improved region boundaries using BFS with edge segments...");
+
+        if (regions == null || regions.regionNodes == null) return;
+
+        // For each region, build a graph of boundary vertices and trace boundaries using BFS
+        for (Node regionNode : regions.regionNodes) {
+            System.out.println("\nBuilding improved boundary for region @" + regionNode.position + ":");
+
+            // Find the corresponding Region object
+            Region region = null;
+            for (Region r : regionList) {
+                if (r.seedNode == regionNode) {
+                    region = r;
+                    break;
+                }
+            }
+            if (region == null) continue;
+
+            // Build boundary vertex graph for this region
+            HashMap<Point, BoundaryVertex> vertexMap = buildBoundaryVertexGraph(regionNode, region);
+
+            // Use BFS to trace complete boundary
+            ArrayList<Point> improvedBoundary = traceBoundaryWithBFS(regionNode, region, vertexMap);
+
+            if (improvedBoundary != null && !improvedBoundary.isEmpty()) {
+                region.setPolygon(improvedBoundary);
+                region.isClosed = true;
+                System.out.println("  Successfully traced improved boundary with " + improvedBoundary.size() + " vertices");
+            } else {
+                System.out.println("  Failed to trace improved boundary, keeping existing boundary");
+            }
+        }
+    }
+
+    private HashMap<Point, BoundaryVertex> buildBoundaryVertexGraph(Node regionNode, Region region) {
+        HashMap<Point, BoundaryVertex> vertexMap = new HashMap<>();
+
+        System.out.println("  Building boundary vertex graph...");
+
+        // 1. Add chokepoint contact points as vertices
+        for (Node chokepointNode : region.chokepoints) {
+            // Find the Chokepoint object
+            Chokepoint chokepoint = null;
+            for (Chokepoint cp : regions.chokepoints) {
+                if (cp.node == chokepointNode) {
+                    chokepoint = cp;
+                    break;
+                }
+            }
+
+            if (chokepoint != null && chokepoint.crossingPoints != null) {
+                for (Point contactPoint : chokepoint.crossingPoints) {
+                    BoundaryVertex vertex = new BoundaryVertex(contactPoint,
+                        BoundaryVertex.VertexType.CHOKEPOINT_CONTACT, chokepoint);
+                    vertexMap.put(contactPoint, vertex);
+                }
+            }
+        }
+
+        // 2. Add edge contact points as vertices (if region is edgy)
+        if (region.isEdgy) {
+            for (MapEdgeContact contact : region.edgeContacts) {
+                BoundaryVertex vertex = new BoundaryVertex(contact.contactPoint,
+                    BoundaryVertex.VertexType.EDGE_CONTACT, contact);
+                vertexMap.put(contact.contactPoint, vertex);
+            }
+        }
+
+        // 3. Add obstacle vertices by traversing contours between contact points
+        addObstacleVerticesBetweenContacts(regionNode, region, vertexMap);
+
+        // 4. Connect neighbors based on tracing rules
+        connectBoundaryVertices(regionNode, region, vertexMap);
+
+        System.out.println("    Created " + vertexMap.size() + " boundary vertices");
+        return vertexMap;
+    }
+
+    private void addObstacleVerticesBetweenContacts(Node regionNode, Region region,
+                                                   HashMap<Point, BoundaryVertex> vertexMap) {
+        // For each obstacle that has chokepoint contacts, add intermediate vertices
+        HashMap<Integer, ArrayList<Point>> obstacleContacts = new HashMap<>();
+
+        // Collect contact points by obstacle
+        for (Node chokepointNode : region.chokepoints) {
+            Chokepoint chokepoint = null;
+            for (Chokepoint cp : regions.chokepoints) {
+                if (cp.node == chokepointNode) {
+                    chokepoint = cp;
+                    break;
+                }
+            }
+
+            if (chokepoint != null && chokepoint.obstacleIds != null) {
+                for (int i = 0; i < chokepoint.obstacleIds.length; i++) {
+                    Integer obstacleId = chokepoint.obstacleIds[i];
+                    Point contactPoint = chokepoint.crossingPoints[i];
+
+                    if (!obstacleContacts.containsKey(obstacleId)) {
+                        obstacleContacts.put(obstacleId, new ArrayList<>());
+                    }
+                    obstacleContacts.get(obstacleId).add(contactPoint);
+                }
+            }
+        }
+
+        // Add edge contact points to obstacle map if they're obstacle intersections
+        if (region.isEdgy) {
+            for (MapEdgeContact contact : region.edgeContacts) {
+                if (contact.isObstacle && contact.obstacleId != null) {
+                    if (!obstacleContacts.containsKey(contact.obstacleId)) {
+                        obstacleContacts.put(contact.obstacleId, new ArrayList<>());
+                    }
+                    obstacleContacts.get(contact.obstacleId).add(contact.contactPoint);
+                }
+            }
+        }
+
+        // For each obstacle with multiple contacts, add intermediate vertices along contour
+        for (Map.Entry<Integer, ArrayList<Point>> entry : obstacleContacts.entrySet()) {
+            Integer obstacleId = entry.getKey();
+            ArrayList<Point> contacts = entry.getValue();
+
+            if (contacts.size() >= 2) {
+                // Find the obstacle contour
+                Contour obstacle = null;
+                ArrayList<Contour> currentContours = getSimplifiedContours();
+
+                // Convert obstacle ID back to contour index (reverse the 1000 offset)
+                int contourIndex = obstacleId - 1000;
+                if (contourIndex >= 0 && contourIndex < currentContours.size()) {
+                    obstacle = currentContours.get(contourIndex);
+                }
+
+                if (obstacle != null) {
+                    addIntermediateObstacleVertices(obstacle, contacts, vertexMap);
+                }
+            }
+        }
+    }
+
+    private void addIntermediateObstacleVertices(Contour obstacle, ArrayList<Point> contacts,
+                                               HashMap<Point, BoundaryVertex> vertexMap) {
+        // Find contact points on the obstacle contour and add vertices between them
+        ArrayList<Integer> contactIndices = new ArrayList<>();
+
+        for (Point contact : contacts) {
+            // Find the index of this contact point on the obstacle contour
+            int bestIndex = -1;
+            double minDist = Double.MAX_VALUE;
+
+            for (int i = 0; i < obstacle.points.size(); i++) {
+                Point contourPoint = obstacle.points.get(i);
+                double dist = distance(contact, contourPoint);
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestIndex = i;
+                }
+            }
+
+            if (bestIndex >= 0 && minDist < 5.0) { // Within reasonable tolerance
+                contactIndices.add(bestIndex);
+            }
+        }
+
+        if (contactIndices.size() >= 2) {
+            contactIndices.sort(Integer::compareTo);
+
+            // Add vertices between consecutive contact points
+            for (int i = 0; i < contactIndices.size(); i++) {
+                int startIdx = contactIndices.get(i);
+                int endIdx = contactIndices.get((i + 1) % contactIndices.size());
+
+                addObstacleSegmentVertices(obstacle, startIdx, endIdx, vertexMap);
+            }
+        }
+    }
+
+    private void addObstacleSegmentVertices(Contour obstacle, int startIdx, int endIdx,
+                                          HashMap<Point, BoundaryVertex> vertexMap) {
+        // Add obstacle vertices between startIdx and endIdx (following contour direction)
+        int current = (startIdx + 1) % obstacle.points.size();
+
+        while (current != endIdx) {
+            Point vertex = obstacle.points.get(current);
+            if (!vertexMap.containsKey(vertex)) {
+                BoundaryVertex boundaryVertex = new BoundaryVertex(vertex,
+                    BoundaryVertex.VertexType.OBSTACLE_VERTEX, obstacle);
+                vertexMap.put(vertex, boundaryVertex);
+            }
+
+            current = (current + 1) % obstacle.points.size();
+        }
+    }
+
+    private void connectBoundaryVertices(Node regionNode, Region region,
+                                       HashMap<Point, BoundaryVertex> vertexMap) {
+        System.out.println("    Connecting boundary vertices...");
+
+        for (BoundaryVertex vertex : vertexMap.values()) {
+            // Connect based on vertex type and proximity
+            switch (vertex.type) {
+                case CHOKEPOINT_CONTACT:
+                    connectChokepointVertex(vertex, regionNode, region, vertexMap);
+                    break;
+                case EDGE_CONTACT:
+                    connectEdgeVertex(vertex, regionNode, region, vertexMap);
+                    break;
+                case OBSTACLE_VERTEX:
+                    connectObstacleVertex(vertex, regionNode, region, vertexMap);
+                    break;
+            }
+        }
+    }
+
+    private void connectChokepointVertex(BoundaryVertex vertex, Node regionNode, Region region,
+                                       HashMap<Point, BoundaryVertex> vertexMap) {
+        // Connect to obstacle vertices and other contacts on the same obstacle
+        Chokepoint chokepoint = (Chokepoint) vertex.source;
+
+        // Find which obstacle this contact belongs to
+        int contactObstacleId = -1;
+        for (int i = 0; i < chokepoint.crossingPoints.length; i++) {
+            if (chokepoint.crossingPoints[i].equals(vertex.position)) {
+                contactObstacleId = chokepoint.obstacleIds[i];
+                break;
+            }
+        }
+
+        if (contactObstacleId >= 0) {
+            // Connect to nearby vertices on the same obstacle
+            connectToObstacleNeighbors(vertex, contactObstacleId, vertexMap);
+        }
+    }
+
+    private void connectEdgeVertex(BoundaryVertex vertex, Node regionNode, Region region,
+                                 HashMap<Point, BoundaryVertex> vertexMap) {
+        MapEdgeContact contact = (MapEdgeContact) vertex.source;
+
+        // If this is an edge segment endpoint, connect along the edge
+        if (contact.isEdgeSegment) {
+            connectAlongEdgeSegment(vertex, contact, vertexMap);
+        }
+        // If this is an obstacle-edge intersection, connect to obstacle neighbors
+        else if (contact.isObstacle) {
+            connectToObstacleNeighbors(vertex, contact.obstacleId, vertexMap);
+        }
+    }
+
+    private void connectObstacleVertex(BoundaryVertex vertex, Node regionNode, Region region,
+                                     HashMap<Point, BoundaryVertex> vertexMap) {
+        Contour obstacle = (Contour) vertex.source;
+
+        // We need to find the obstacle ID for this contour
+        // For now, let's use a simple approach - get the obstacle ID from the R-tree system
+        int obstacleId = findObstacleIdForContour(obstacle);
+
+        // Connect to adjacent vertices on the same obstacle contour
+        connectToObstacleNeighbors(vertex, obstacleId, vertexMap);
+    }
+
+    private void connectToObstacleNeighbors(BoundaryVertex vertex, int obstacleId,
+                                          HashMap<Point, BoundaryVertex> vertexMap) {
+        // Find adjacent vertices on the same obstacle
+        for (BoundaryVertex other : vertexMap.values()) {
+            if (other == vertex) continue;
+
+            // Check if they're on the same obstacle and close enough to be neighbors
+            boolean sameObstacle = false;
+            if (other.type == BoundaryVertex.VertexType.OBSTACLE_VERTEX) {
+                Contour otherObstacle = (Contour) other.source;
+                int otherObstacleId = findObstacleIdForContour(otherObstacle);
+                sameObstacle = (otherObstacleId == obstacleId);
+            } else if (other.type == BoundaryVertex.VertexType.CHOKEPOINT_CONTACT) {
+                Chokepoint otherChokepoint = (Chokepoint) other.source;
+                for (int i = 0; i < otherChokepoint.obstacleIds.length; i++) {
+                    if (otherChokepoint.obstacleIds[i] == obstacleId &&
+                        otherChokepoint.crossingPoints[i].equals(other.position)) {
+                        sameObstacle = true;
+                        break;
+                    }
+                }
+            } else if (other.type == BoundaryVertex.VertexType.EDGE_CONTACT) {
+                MapEdgeContact otherContact = (MapEdgeContact) other.source;
+                sameObstacle = (otherContact.isObstacle && otherContact.obstacleId != null &&
+                               otherContact.obstacleId == obstacleId);
+            }
+
+            if (sameObstacle && distance(vertex.position, other.position) < 50) {
+                vertex.neighbors.add(other);
+                other.neighbors.add(vertex);
+            }
+        }
+    }
+
+    private void connectAlongEdgeSegment(BoundaryVertex vertex, MapEdgeContact contact,
+                                       HashMap<Point, BoundaryVertex> vertexMap) {
+        // Connect to other vertices along the same map edge
+        for (BoundaryVertex other : vertexMap.values()) {
+            if (other == vertex) continue;
+
+            if (other.type == BoundaryVertex.VertexType.EDGE_CONTACT) {
+                MapEdgeContact otherContact = (MapEdgeContact) other.source;
+
+                // If they're on the same edge and reasonably close
+                if (otherContact.edge == contact.edge &&
+                    distance(vertex.position, other.position) < 100) {
+                    vertex.neighbors.add(other);
+                    other.neighbors.add(vertex);
+                }
+            }
+        }
+    }
+
+    private ArrayList<Point> traceBoundaryWithBFS(Node regionNode, Region region,
+                                                HashMap<Point, BoundaryVertex> vertexMap) {
+        System.out.println("    Tracing boundary using boundary following...");
+
+        if (vertexMap.isEmpty()) return null;
+
+        // Start from any vertex (prefer chokepoint contacts)
+        BoundaryVertex startVertex = null;
+        for (BoundaryVertex vertex : vertexMap.values()) {
+            if (vertex.type == BoundaryVertex.VertexType.CHOKEPOINT_CONTACT) {
+                startVertex = vertex;
+                break;
+            }
+        }
+        if (startVertex == null) startVertex = vertexMap.values().iterator().next();
+
+        // Use boundary following instead of BFS - trace around the perimeter
+        ArrayList<Point> boundary = new ArrayList<>();
+        HashSet<BoundaryVertex> visited = new HashSet<>();
+
+        BoundaryVertex current = startVertex;
+        boundary.add(current.position);
+        visited.add(current);
+
+        // Follow the boundary by always taking the "rightmost" (clockwise) next vertex
+        while (true) {
+            BoundaryVertex nextVertex = findNextBoundaryVertex(current, visited, regionNode);
+
+            if (nextVertex == null) {
+                System.out.println("      No valid next vertex found, ending trace");
+                break;
+            }
+
+            if (nextVertex == startVertex) {
+                System.out.println("      Returned to start vertex, boundary closed");
+                break;
+            }
+
+            if (visited.contains(nextVertex)) {
+                System.out.println("      Encountered already visited vertex, ending trace");
+                break;
+            }
+
+            visited.add(nextVertex);
+            boundary.add(nextVertex.position);
+            current = nextVertex;
+
+            // Safety check to prevent infinite loops
+            if (boundary.size() > vertexMap.size() * 2) {
+                System.out.println("      Safety limit reached, ending trace");
+                break;
+            }
+        }
+
+        // Close the boundary if not already closed
+        if (boundary.size() > 2 && !boundary.get(0).equals(boundary.get(boundary.size() - 1))) {
+            boundary.add(boundary.get(0));
+        }
+
+        System.out.println("    Traced boundary with " + boundary.size() + " points, visited " + visited.size() + "/" + vertexMap.size() + " vertices");
+        return boundary;
+    }
+
+    private BoundaryVertex findNextBoundaryVertex(BoundaryVertex current, HashSet<BoundaryVertex> visited, Node regionNode) {
+        if (current.neighbors.isEmpty()) return null;
+
+        BoundaryVertex bestNext = null;
+        double bestAngle = Double.MAX_VALUE;
+
+        // Find the neighbor with the smallest clockwise angle from the current direction
+        for (BoundaryVertex neighbor : current.neighbors) {
+            if (visited.contains(neighbor)) continue;
+
+            // For simplicity, just pick the closest unvisited neighbor for now
+            // TODO: Implement proper angle-based selection for clockwise traversal
+            if (bestNext == null) {
+                bestNext = neighbor;
+            } else {
+                double currentDist = distance(current.position, neighbor.position);
+                double bestDist = distance(current.position, bestNext.position);
+                if (currentDist < bestDist) {
+                    bestNext = neighbor;
+                }
+            }
+        }
+
+        return bestNext;
+    }
+
+    private boolean shouldAbortBranch(BoundaryVertex vertex, Node currentRegion) {
+        // Check if this vertex is explicitly NOT assigned to the current region
+        // Only abort if the feature is assigned to specific regions and current region is not one of them
+        switch (vertex.type) {
+            case CHOKEPOINT_CONTACT:
+                Chokepoint chokepoint = (Chokepoint) vertex.source;
+                // Chokepoints connect regions, so only abort if this chokepoint is definitely not connected to current region
+                // Since chokepoints bridge regions, they should generally be allowed unless explicitly excluded
+                return !chokepoint.node.neighbours.contains(currentRegion);
+
+            case EDGE_CONTACT:
+                MapEdgeContact contact = (MapEdgeContact) vertex.source;
+                if (contact.isChokepoint && contact.chokepointNode != null) {
+                    // Same logic - only abort if chokepoint doesn't connect to current region
+                    return !contact.chokepointNode.neighbours.contains(currentRegion);
+                }
+                // Edge segments and obstacle intersections are generally shared - don't abort
+                return false;
+
+            case OBSTACLE_VERTEX:
+                // Obstacle vertices are shared between adjacent regions - don't abort based on region ownership
+                // The obstacle forms the boundary, so it's shared territory
+                return false;
+        }
+
+        return false; // Default to not aborting - be permissive
+    }
+
+    private int findObstacleIdForContour(Contour targetContour) {
+        // Find the index of this contour in the simplified contours list
+        ArrayList<Contour> currentContours = getSimplifiedContours();
+
+        for (int i = 0; i < currentContours.size(); i++) {
+            Contour contour = currentContours.get(i);
+            // Check if this is the same contour (by reference or by matching points)
+            if (contour == targetContour || contoursMatch(contour, targetContour)) {
+                // Convert contour index to obstacle ID (add 1000 offset)
+                return 1000 + i;
+            }
+        }
+
+        // If not found, return -1 (invalid obstacle ID)
+        return -1;
+    }
+
+    private boolean contoursMatch(Contour c1, Contour c2) {
+        if (c1.points.size() != c2.points.size()) return false;
+
+        // Check if first few points match (reasonable heuristic)
+        int checkPoints = Math.min(3, c1.points.size());
+        for (int i = 0; i < checkPoints; i++) {
+            Point p1 = c1.points.get(i);
+            Point p2 = c2.points.get(i);
+            if (!p1.equals(p2)) return false;
+        }
+
+        return true;
+    }
+
     private void buildRegionBoundariesFromChokepoints(RegionGraph graph) {
         System.out.println("Building region boundaries from chokepoint contacts...");
 
@@ -3003,6 +3508,7 @@ public class ZKTerrainAnalyzer {
     private void detectMapEdgeContacts() {
         System.out.println("Detecting map edge contacts...");
         mapEdgeContacts.clear();
+        edgeContactSplitPoints.clear();
 
         // Define map edges as line segments
         Point[] topEdge = {new Point(0, 0), new Point(width-1, 0)};
@@ -3016,6 +3522,23 @@ public class ZKTerrainAnalyzer {
         detectObstacleMapEdgeContacts(leftEdge, MapEdge.LEFT);
         detectObstacleMapEdgeContacts(rightEdge, MapEdge.RIGHT);
 
+        // Split obstacle segments at edge contact points
+        splitObstacleSegmentsAtEdgeContacts();
+
+        // NOTE: Chokepoint edge contacts will be detected later after chokepoints are created
+
+        System.out.println("Found " + mapEdgeContacts.size() + " map edge contacts");
+    }
+
+    private void detectChokepointAndEdgeSegmentContacts() {
+        System.out.println("Detecting chokepoint and edge segment contacts...");
+
+        // Define map edges as line segments
+        Point[] topEdge = {new Point(0, 0), new Point(width-1, 0)};
+        Point[] bottomEdge = {new Point(0, height-1), new Point(width-1, height-1)};
+        Point[] leftEdge = {new Point(0, 0), new Point(0, height-1)};
+        Point[] rightEdge = {new Point(width-1, 0), new Point(width-1, height-1)};
+
         // Check chokepoint crossing segments against map edges
         detectChokepointMapEdgeContacts(topEdge, MapEdge.TOP);
         detectChokepointMapEdgeContacts(bottomEdge, MapEdge.BOTTOM);
@@ -3025,7 +3548,7 @@ public class ZKTerrainAnalyzer {
         // Create contacts for edge segment endpoints
         createEdgeSegmentContacts();
 
-        System.out.println("Found " + mapEdgeContacts.size() + " map edge contacts");
+        System.out.println("Total map edge contacts now: " + mapEdgeContacts.size());
     }
 
     private void createEdgeSegmentContacts() {
@@ -3047,6 +3570,126 @@ public class ZKTerrainAnalyzer {
         }
 
         System.out.println("Created " + contactsCreated + " edge segment contact points");
+    }
+
+    private void splitObstacleSegmentsAtEdgeContacts() {
+        if (edgeContactSplitPoints.isEmpty()) {
+            System.out.println("No edge contact split points to process");
+            return;
+        }
+
+        System.out.println("Splitting obstacle segments at " +
+            edgeContactSplitPoints.values().stream().mapToInt(List::size).sum() + " edge contact points...");
+
+        // Debug: Print all split points
+        for (Map.Entry<Integer, ArrayList<Point>> entry : edgeContactSplitPoints.entrySet()) {
+            System.out.println("  Contour " + entry.getKey() + " has " + entry.getValue().size() + " split points: " + entry.getValue());
+        }
+
+        // Apply splits by inserting contact points into the contours
+        int totalSplits = 0;
+        for (Map.Entry<Integer, ArrayList<Point>> entry : edgeContactSplitPoints.entrySet()) {
+            Integer contourIndex = entry.getKey();
+            ArrayList<Point> splitPoints = entry.getValue();
+
+            if (splitPoints.size() > 0) {
+                Contour originalContour = simplifiedContours.get(contourIndex);
+                ArrayList<Point> newPoints = new ArrayList<>();
+
+                // For each segment, check if it crosses an edge and needs splitting
+                for (int i = 0; i < originalContour.points.size() - 1; i++) {
+                    Point p1 = originalContour.points.get(i);
+                    Point p2 = originalContour.points.get(i + 1);
+
+                    // Add the start point
+                    newPoints.add(p1);
+
+                    // Check which split points should be inserted between p1 and p2
+                    // A split point belongs to this segment if the segment crosses the edge
+                    ArrayList<Point> segmentSplits = new ArrayList<>();
+
+                    for (Point splitPoint : splitPoints) {
+                        // Check if this segment crosses the edge where the split point is located
+                        // If p1 and p2 are on opposite sides of the edge (or one is on the edge),
+                        // and the split point is between them, insert it
+                        // Skip if the split point is already a vertex
+                        if (!splitPoint.equals(p1) && !splitPoint.equals(p2) &&
+                            shouldInsertSplitPoint(p1, p2, splitPoint)) {
+                            segmentSplits.add(splitPoint);
+                        }
+                    }
+
+                    // Sort split points by distance from p1 to maintain order
+                    if (segmentSplits.size() > 0) {
+                        segmentSplits.sort((a, b) -> {
+                            double distA = distance(p1, a);
+                            double distB = distance(p1, b);
+                            return Double.compare(distA, distB);
+                        });
+
+                        // Add all split points on this segment
+                        for (Point splitPoint : segmentSplits) {
+                            newPoints.add(splitPoint);
+                            totalSplits++;
+                            System.out.println("    Inserted split point " + splitPoint + " between " + p1 + " and " + p2);
+                        }
+                    }
+                }
+
+                // Add the last point (close the contour)
+                if (originalContour.points.size() > 0) {
+                    newPoints.add(originalContour.points.get(originalContour.points.size() - 1));
+                }
+
+                // Update the contour with new points
+                originalContour.points = newPoints;
+                System.out.println("  Contour " + contourIndex + " updated: " +
+                    (originalContour.points.size() - totalSplits) + " points -> " +
+                    originalContour.points.size() + " points");
+            }
+        }
+
+        System.out.println("Split " + totalSplits + " obstacle segments at edge contact points");
+
+        // Rebuild the R-tree with the updated contours
+        if (totalSplits > 0) {
+            System.out.println("Rebuilding R-tree after edge contact splitting...");
+            simplifiedLabelTree = createSimplifiedRTree();
+            System.out.println("R-tree rebuilt with updated obstacle segments");
+        }
+    }
+
+    private boolean shouldInsertSplitPoint(Point p1, Point p2, Point splitPoint) {
+        // Determine which edge the split point is on
+        boolean onTop = (splitPoint.y == 0);
+        boolean onBottom = (splitPoint.y == height - 1);
+        boolean onLeft = (splitPoint.x == 0);
+        boolean onRight = (splitPoint.x == width - 1);
+
+        // Check if the segment p1->p2 crosses this edge
+        if (onTop || onBottom) {
+            int targetY = onTop ? 0 : height - 1;
+            // Check if p1 and p2 are on opposite sides of this horizontal edge
+            if ((p1.y <= targetY && p2.y >= targetY) || (p1.y >= targetY && p2.y <= targetY)) {
+                // Check if splitPoint.x is between p1.x and p2.x (approximately)
+                int minX = Math.min(p1.x, p2.x);
+                int maxX = Math.max(p1.x, p2.x);
+                return splitPoint.x >= minX - 1 && splitPoint.x <= maxX + 1;
+            }
+        }
+
+        if (onLeft || onRight) {
+            int targetX = onLeft ? 0 : width - 1;
+            // Check if p1 and p2 are on opposite sides of this vertical edge
+            if ((p1.x <= targetX && p2.x >= targetX) || (p1.x >= targetX && p2.x <= targetX)) {
+                // Check if splitPoint.y is between p1.y and p2.y (approximately)
+                int minY = Math.min(p1.y, p2.y);
+                int maxY = Math.max(p1.y, p2.y);
+                return splitPoint.y >= minY - 1 && splitPoint.y <= maxY + 1;
+            }
+        }
+
+        return false;
     }
 
     private void markEdgyRegions(RegionGraph graph) {
@@ -3129,21 +3772,24 @@ public class ZKTerrainAnalyzer {
                     // Found an intersection - this is a map edge contact
                     MapEdgeContact contact = new MapEdgeContact(intersection, edge, obstacleId);
                     mapEdgeContacts.add(contact);
+
+                    // Track this point for splitting the obstacle segment (avoid duplicates)
+                    if (!edgeContactSplitPoints.containsKey(contourIndex)) {
+                        edgeContactSplitPoints.put(contourIndex, new ArrayList<>());
+                    }
+                    ArrayList<Point> splitList = edgeContactSplitPoints.get(contourIndex);
+                    boolean alreadyAdded = false;
+                    for (Point existing : splitList) {
+                        if (distance(existing, intersection) < 1.0) {
+                            alreadyAdded = true;
+                            break;
+                        }
+                    }
+                    if (!alreadyAdded) {
+                        splitList.add(intersection);
+                    }
+
                     System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + intersection + " (intersection)");
-                }
-            }
-
-            // Also check each vertex for proximity to map edges (within 4 pixels)
-            for (int i = 0; i < contour.length(); i++) {
-                Point vertex = contour.getPoint(i);
-                Point nearestOnEdge = getNearestPointOnMapEdge(vertex, edge);
-                double distance = distance(vertex, nearestOnEdge);
-
-                if (distance <= 4.0) {
-                    // Vertex is close to map edge - add as contact at the vertex location
-                    MapEdgeContact contact = new MapEdgeContact(vertex, edge, obstacleId);
-                    mapEdgeContacts.add(contact);
-                    System.out.println("  Obstacle " + obstacleId + " contacts " + edge + " edge at " + vertex + " (proximity, dist=" + String.format("%.1f", distance) + ")");
                 }
             }
         }
