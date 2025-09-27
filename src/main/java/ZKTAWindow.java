@@ -724,6 +724,34 @@ public class ZKTAWindow {
             }
             data.put("contourEdgeContacts", contourEdgeContacts);
 
+            // Export complete obstacle contours for analysis
+            ArrayList<Map<String, Object>> obstacleContours = new ArrayList<>();
+            for (int contourIndex = 0; contourIndex < contours.size(); contourIndex++) {
+                Contour contour = contours.get(contourIndex);
+                int obstacleId = 1000 + contourIndex; // Match the obstacle ID convention
+
+                Map<String, Object> contourData = new HashMap<>();
+                contourData.put("obstacleId", obstacleId);
+
+                // Export ALL contour points
+                ArrayList<Map<String, Object>> contourPoints = new ArrayList<>();
+                for (Point point : contour.getPoints()) {
+                    Map<String, Object> pointData = new HashMap<>();
+                    pointData.put("x", point.x);
+                    pointData.put("y", point.y);
+                    contourPoints.add(pointData);
+                }
+                contourData.put("points", contourPoints);
+
+                // Include counts for debugging
+                contourData.put("pointCount", contourPoints.size());
+                contourData.put("edgeContactCount", contour.edgeContacts.size());
+                contourData.put("chokepointContactCount", contour.chokepointContacts.size());
+
+                obstacleContours.add(contourData);
+            }
+            data.put("obstacleContours", obstacleContours);
+
             // Write to file
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File("result.json"), data);
             System.out.println("Exported data to result.json");
