@@ -155,9 +155,24 @@ public class ZKTerrainAnalyzer {
     }
 
     // Debug: Check if a pixel is blocked by any obstacle using R-tree
-    private boolean isPixelBlocked(int x, int y) {
+    // Returns the obstacle ID if blocked, null if not blocked
+    // Helper class to return obstacle contact information
+    public static class ObstacleContactInfo {
+        public Integer obstacleId;
+        public Point vertex1, vertex2; // The two endpoints of the blocking segment
+        public Line segment;
+
+        public ObstacleContactInfo(Integer obstacleId, Point vertex1, Point vertex2, Line segment) {
+            this.obstacleId = obstacleId;
+            this.vertex1 = vertex1;
+            this.vertex2 = vertex2;
+            this.segment = segment;
+        }
+    }
+
+    private ObstacleContactInfo getBlockingObstacle(int x, int y) {
         if (simplifiedLabelTree == null) {
-            return false; // No obstacles loaded yet
+            return null; // No obstacles loaded yet
         }
 
         // Use R-tree to find nearest obstacle segment
@@ -178,11 +193,23 @@ public class ZKTerrainAnalyzer {
                                  ", blocked=" + blocked + " (threshold=" + EDGE_OBSTACLE_THRESHOLD + ")");
             }
 
-            return blocked;
+            if (blocked) {
+                // Extract segment endpoints from the Line
+                Point vertex1 = new Point((int)line.x1(), (int)line.y1());
+                Point vertex2 = new Point((int)line.x2(), (int)line.y2());
+
+                return new ObstacleContactInfo(entry.value(), vertex1, vertex2, line);
+            }
+            return null;
         } catch (Exception e) {
             // No obstacles found or error - assume passable
-            return false;
+            return null;
         }
+    }
+
+    // Compatibility wrapper for existing code
+    private boolean isPixelBlocked(int x, int y) {
+        return getBlockingObstacle(x, y) != null;
     }
 
     // Scan all map edges to find passable segments
@@ -223,17 +250,41 @@ public class ZKTerrainAnalyzer {
         for (int pos = 0; pos < edgeLength; pos++) {
             // Convert position to pixel coordinates
             Point pixel = getPixelForEdgePosition(edge, pos);
-            boolean isBlocked = isPixelBlocked(pixel.x, pixel.y);
+            ObstacleContactInfo contactInfo = getBlockingObstacle(pixel.x, pixel.y);
+            boolean isBlocked = (contactInfo != null);
 
             if (!isBlocked && segmentStart == null) {
-                // Start of passable segment
+                // Start of passable segment - check what obstacle was blocking before this
+                if (pos > 0) {
+                    Point prevPixel = getPixelForEdgePosition(edge, pos - 1);
+                    ObstacleContactInfo prevContactInfo = getBlockingObstacle(prevPixel.x, prevPixel.y);
+                    if (prevContactInfo != null) {
+                        // Create edge contact using vertex-to-edge snapping
+                        createEdgeContact(prevContactInfo, edge, pixel);
+
+                        // Also create traditional MapEdgeContact for backward compatibility
+                        MapEdgeContact obstacleContact = new MapEdgeContact(pixel, edge, prevContactInfo.obstacleId);
+                        mapEdgeContacts.add(obstacleContact);
+                        System.out.println("  Edge segment starts at " + pixel + " after obstacle " + prevContactInfo.obstacleId);
+                    }
+                }
                 segmentStart = pixel;
                 segmentStartPos = pos;
             } else if (isBlocked && segmentStart != null) {
-                // End of passable segment
+                // End of passable segment due to obstacle
                 Point segmentEnd = getPixelForEdgePosition(edge, pos - 1);
                 EdgeSegment segment = new EdgeSegment(segmentStart, segmentEnd, edge, segmentStartPos, pos - 1);
                 segmentsForEdge.add(segment);
+
+                // Create edge contact using vertex-to-edge snapping
+                createEdgeContact(contactInfo, edge, pixel);
+
+                // Also create traditional MapEdgeContact for backward compatibility
+                Integer blockingObstacle = contactInfo.obstacleId;
+                MapEdgeContact obstacleContact = new MapEdgeContact(pixel, edge, blockingObstacle);
+                mapEdgeContacts.add(obstacleContact);
+                System.out.println("  Edge segment ends at " + segmentEnd + " due to obstacle " + blockingObstacle);
+
                 segmentStart = null;
                 segmentStartPos = -1;
             }
@@ -268,6 +319,131 @@ public class ZKTerrainAnalyzer {
             case RIGHT:  return pixel.y;
             default:     throw new IllegalArgumentException("Invalid edge: " + edge);
         }
+    }
+
+    // Helper method to find contour by obstacle ID
+    private Contour findContourByObstacleId(Integer obstacleId) {
+        // Obstacle IDs in R-tree are contour index + 1000 (see line 567)
+        if (obstacleId != null && obstacleId >= 1000) {
+            int contourIndex = obstacleId - 1000;
+            if (contourIndex >= 0 && contourIndex < simplifiedContours.size()) {
+                return simplifiedContours.get(contourIndex);
+            }
+        }
+        return null;
+    }
+
+    // Calculate edge-specific contact point using segment midpoint
+    private Point calculateEdgeContactPoint(MapEdge edge, Point vertex1, Point vertex2) {
+        int midX, midY;
+
+        switch (edge) {
+            case LEFT:
+                midX = 0; // Fixed x coordinate for left edge
+                midY = (vertex1.y + vertex2.y) / 2; // Average of y coordinates
+                break;
+            case TOP:
+                midX = (vertex1.x + vertex2.x) / 2; // Average of x coordinates
+                midY = 0; // Fixed y coordinate for top edge
+                break;
+            case RIGHT:
+                midX = width - 1; // Fixed x coordinate for right edge
+                midY = (vertex1.y + vertex2.y) / 2; // Average of y coordinates
+                break;
+            case BOTTOM:
+                midX = (vertex1.x + vertex2.x) / 2; // Average of x coordinates
+                midY = height - 1; // Fixed y coordinate for bottom edge
+                break;
+            default:
+                throw new IllegalArgumentException("Invalid edge: " + edge);
+        }
+
+        return new Point(midX, midY);
+    }
+
+    // Create edge contact with vertex-to-edge snapping logic
+    private void createEdgeContact(ObstacleContactInfo contactInfo, MapEdge edge, Point originalContactPixel) {
+        if (contactInfo == null) return;
+
+        Contour contour = findContourByObstacleId(contactInfo.obstacleId);
+        if (contour == null) {
+            System.out.println("Warning: Could not find contour for obstacle " + contactInfo.obstacleId);
+            return;
+        }
+
+        // Calculate the edge-specific contact point using segment midpoint
+        Point edgeContactPoint = calculateEdgeContactPoint(edge, contactInfo.vertex1, contactInfo.vertex2);
+
+        // Check threshold distance to both segment endpoints
+        double threshold = 2.0; // Same threshold as chokepoint logic
+        double distToVertex1 = distance(edgeContactPoint, contactInfo.vertex1);
+        double distToVertex2 = distance(edgeContactPoint, contactInfo.vertex2);
+
+        Point finalContactPoint;
+        boolean needsSegmentSplit = true;
+
+        if (distToVertex1 <= threshold) {
+            // Snap vertex1 to the original contact pixel and mark it as edgy
+            finalContactPoint = originalContactPixel;
+            snapVertexToEdgeContact(contour, contactInfo.vertex1, originalContactPixel);
+            needsSegmentSplit = false;
+            System.out.println("  Snapped vertex1 " + contactInfo.vertex1 + " to edge contact " + originalContactPixel);
+        } else if (distToVertex2 <= threshold) {
+            // Snap vertex2 to the original contact pixel and mark it as edgy
+            finalContactPoint = originalContactPixel;
+            snapVertexToEdgeContact(contour, contactInfo.vertex2, originalContactPixel);
+            needsSegmentSplit = false;
+            System.out.println("  Snapped vertex2 " + contactInfo.vertex2 + " to edge contact " + originalContactPixel);
+        } else {
+            // Use the calculated edge contact point and split the segment
+            finalContactPoint = edgeContactPoint;
+            System.out.println("  Using midpoint contact " + edgeContactPoint + " (will require segment split)");
+        }
+
+        // Find the segment index for this contact
+        int segmentIndex = findSegmentIndexForContact(contour, contactInfo.vertex1, contactInfo.vertex2);
+        if (segmentIndex >= 0) {
+            // Add edge contact to contour
+            contour.edgeContacts.add(new Contour.EdgeContact(finalContactPoint, segmentIndex));
+            System.out.println("  Added edge contact: " + finalContactPoint + " on segment " + segmentIndex + " of contour (obstacle " + contactInfo.obstacleId + ")");
+
+            // TODO: Handle segment splitting if needsSegmentSplit is true
+            if (needsSegmentSplit) {
+                System.out.println("  TODO: Implement segment splitting for midpoint contact");
+            }
+        } else {
+            System.out.println("  Warning: Could not find segment for contact vertices in contour");
+        }
+    }
+
+    // Snap a vertex in the contour to the edge contact point
+    private void snapVertexToEdgeContact(Contour contour, Point targetVertex, Point edgeContactPoint) {
+        for (int i = 0; i < contour.points.size(); i++) {
+            Point vertex = contour.points.get(i);
+            if (vertex.equals(targetVertex)) {
+                // Update the vertex coordinates to the edge contact point
+                vertex.x = edgeContactPoint.x;
+                vertex.y = edgeContactPoint.y;
+                System.out.println("    Moved vertex at index " + i + " to " + edgeContactPoint);
+                return;
+            }
+        }
+        System.out.println("    Warning: Target vertex " + targetVertex + " not found in contour");
+    }
+
+    // Find the segment index that contains the given vertices
+    private int findSegmentIndexForContact(Contour contour, Point vertex1, Point vertex2) {
+        for (int i = 0; i < contour.points.size() - 1; i++) {
+            Point p1 = contour.points.get(i);
+            Point p2 = contour.points.get(i + 1);
+
+            // Check if this segment matches either direction
+            if ((p1.equals(vertex1) && p2.equals(vertex2)) ||
+                (p1.equals(vertex2) && p2.equals(vertex1))) {
+                return i;
+            }
+        }
+        return -1; // Segment not found
     }
 
     // Debug: Split debug edge segments at chokepoint contact points
@@ -3545,32 +3721,10 @@ public class ZKTerrainAnalyzer {
         detectChokepointMapEdgeContacts(leftEdge, MapEdge.LEFT);
         detectChokepointMapEdgeContacts(rightEdge, MapEdge.RIGHT);
 
-        // Create contacts for edge segment endpoints
-        createEdgeSegmentContacts();
 
         System.out.println("Total map edge contacts now: " + mapEdgeContacts.size());
     }
 
-    private void createEdgeSegmentContacts() {
-        System.out.println("Creating contact points for " + edgeSegments.size() + " edge segment endpoints...");
-
-        int contactsCreated = 0;
-        for (EdgeSegment segment : edgeSegments) {
-            // Create contact point for segment start
-            MapEdgeContact startContact = new MapEdgeContact(segment.start, segment.edge, segment);
-            mapEdgeContacts.add(startContact);
-            contactsCreated++;
-
-            // Create contact point for segment end (if different from start)
-            if (!segment.start.equals(segment.end)) {
-                MapEdgeContact endContact = new MapEdgeContact(segment.end, segment.edge, segment);
-                mapEdgeContacts.add(endContact);
-                contactsCreated++;
-            }
-        }
-
-        System.out.println("Created " + contactsCreated + " edge segment contact points");
-    }
 
     private void splitObstacleSegmentsAtEdgeContacts() {
         if (edgeContactSplitPoints.isEmpty()) {

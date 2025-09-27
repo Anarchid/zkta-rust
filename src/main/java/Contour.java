@@ -4,6 +4,7 @@ import java.util.Collections;
 public class Contour {
     ArrayList<Point> points;
     ArrayList<ChokepointContact> chokepointContacts; // Chokepoints that touch this contour
+    ArrayList<EdgeContact> edgeContacts; // Map edge contacts on this contour
 
     public static class ChokepointContact {
         public Node chokepoint;
@@ -16,13 +17,25 @@ public class Contour {
             this.segmentIndex = segmentIndex;
         }
     }
+
+    public static class EdgeContact {
+        public Point contactPoint;
+        public int segmentIndex; // Which segment of the contour contains this contact
+
+        public EdgeContact(Point contactPoint, int segmentIndex) {
+            this.contactPoint = contactPoint;
+            this.segmentIndex = segmentIndex;
+        }
+    }
     Contour(){
         this.points = new ArrayList<Point>();
         this.chokepointContacts = new ArrayList<>();
+        this.edgeContacts = new ArrayList<>();
     }
     Contour(ArrayList<Point>p){
         this.points = p;
         this.chokepointContacts = new ArrayList<>();
+        this.edgeContacts = new ArrayList<>();
     }
     Contour(Point[] pts){
         this();
