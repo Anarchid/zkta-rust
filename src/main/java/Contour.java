@@ -21,10 +21,12 @@ public class Contour {
     public static class EdgeContact {
         public Point contactPoint;
         public int segmentIndex; // Which segment of the contour contains this contact
+        public ZKTerrainAnalyzer.EdgeSegment edgeSegment; // The specific edge segment we contact
 
-        public EdgeContact(Point contactPoint, int segmentIndex) {
+        public EdgeContact(Point contactPoint, int segmentIndex, ZKTerrainAnalyzer.EdgeSegment edgeSegment) {
             this.contactPoint = contactPoint;
             this.segmentIndex = segmentIndex;
+            this.edgeSegment = edgeSegment;
         }
     }
     Contour(){

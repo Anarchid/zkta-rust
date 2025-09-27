@@ -680,6 +680,50 @@ public class ZKTAWindow {
             }
             data.put("mapEdgeContacts", mapEdgeContacts);
 
+            // Export edge contacts from contours
+            ArrayList<Map<String, Object>> contourEdgeContacts = new ArrayList<>();
+            ArrayList<Contour> contours = zkta.getSimplifiedContours();
+            for (int contourIndex = 0; contourIndex < contours.size(); contourIndex++) {
+                Contour contour = contours.get(contourIndex);
+                int obstacleId = 1000 + contourIndex; // Match the obstacle ID convention
+
+                for (Contour.EdgeContact edgeContact : contour.edgeContacts) {
+                    Map<String, Object> contactData = new HashMap<>();
+
+                    // Contact point
+                    Map<String, Integer> contactPoint = new HashMap<>();
+                    contactPoint.put("x", edgeContact.contactPoint.x);
+                    contactPoint.put("y", edgeContact.contactPoint.y);
+                    contactData.put("contactPoint", contactPoint);
+
+                    // Edge information from EdgeSegment
+                    contactData.put("edge", edgeContact.edgeSegment.edge.toString());
+
+                    // EdgeSegment details for pathfinding
+                    Map<String, Integer> segmentStart = new HashMap<>();
+                    segmentStart.put("x", edgeContact.edgeSegment.start.x);
+                    segmentStart.put("y", edgeContact.edgeSegment.start.y);
+                    contactData.put("edgeSegmentStart", segmentStart);
+
+                    Map<String, Integer> segmentEnd = new HashMap<>();
+                    segmentEnd.put("x", edgeContact.edgeSegment.end.x);
+                    segmentEnd.put("y", edgeContact.edgeSegment.end.y);
+                    contactData.put("edgeSegmentEnd", segmentEnd);
+
+                    contactData.put("startPosition", edgeContact.edgeSegment.startPosition);
+                    contactData.put("endPosition", edgeContact.edgeSegment.endPosition);
+
+                    // Metadata
+                    contactData.put("type", "obstacle");
+                    contactData.put("obstacleId", obstacleId);
+                    contactData.put("segmentIndex", edgeContact.segmentIndex);
+                    contactData.put("source", "contour");
+
+                    contourEdgeContacts.add(contactData);
+                }
+            }
+            data.put("contourEdgeContacts", contourEdgeContacts);
+
             // Write to file
             mapper.writerWithDefaultPrettyPrinter().writeValue(new File("result.json"), data);
             System.out.println("Exported data to result.json");

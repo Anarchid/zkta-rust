@@ -254,20 +254,7 @@ public class ZKTerrainAnalyzer {
             boolean isBlocked = (contactInfo != null);
 
             if (!isBlocked && segmentStart == null) {
-                // Start of passable segment - check what obstacle was blocking before this
-                if (pos > 0) {
-                    Point prevPixel = getPixelForEdgePosition(edge, pos - 1);
-                    ObstacleContactInfo prevContactInfo = getBlockingObstacle(prevPixel.x, prevPixel.y);
-                    if (prevContactInfo != null) {
-                        // Create edge contact using vertex-to-edge snapping
-                        createEdgeContact(prevContactInfo, edge, pixel);
-
-                        // Also create traditional MapEdgeContact for backward compatibility
-                        MapEdgeContact obstacleContact = new MapEdgeContact(pixel, edge, prevContactInfo.obstacleId);
-                        mapEdgeContacts.add(obstacleContact);
-                        System.out.println("  Edge segment starts at " + pixel + " after obstacle " + prevContactInfo.obstacleId);
-                    }
-                }
+                // Start of passable segment - store start contact info for later
                 segmentStart = pixel;
                 segmentStartPos = pos;
             } else if (isBlocked && segmentStart != null) {
@@ -276,14 +263,23 @@ public class ZKTerrainAnalyzer {
                 EdgeSegment segment = new EdgeSegment(segmentStart, segmentEnd, edge, segmentStartPos, pos - 1);
                 segmentsForEdge.add(segment);
 
-                // Create edge contact using vertex-to-edge snapping
-                createEdgeContact(contactInfo, edge, pixel);
+                // Create edge contact for the END of the segment (current obstacle blocking)
+                createEdgeContact(contactInfo, edge, pixel, segment);
+
+                // Create edge contact for the START of the segment (previous obstacle that ended)
+                if (segmentStartPos > 0) {
+                    Point prevPixel = getPixelForEdgePosition(edge, segmentStartPos - 1);
+                    ObstacleContactInfo prevContactInfo = getBlockingObstacle(prevPixel.x, prevPixel.y);
+                    if (prevContactInfo != null) {
+                        createEdgeContact(prevContactInfo, edge, segmentStart, segment);
+                    }
+                }
 
                 // Also create traditional MapEdgeContact for backward compatibility
                 Integer blockingObstacle = contactInfo.obstacleId;
                 MapEdgeContact obstacleContact = new MapEdgeContact(pixel, edge, blockingObstacle);
                 mapEdgeContacts.add(obstacleContact);
-                System.out.println("  Edge segment ends at " + segmentEnd + " due to obstacle " + blockingObstacle);
+                System.out.println("  Edge segment " + segmentStart + "->" + segmentEnd + " complete with contacts");
 
                 segmentStart = null;
                 segmentStartPos = -1;
@@ -295,6 +291,16 @@ public class ZKTerrainAnalyzer {
             Point segmentEnd = getPixelForEdgePosition(edge, edgeLength - 1);
             EdgeSegment segment = new EdgeSegment(segmentStart, segmentEnd, edge, segmentStartPos, edgeLength - 1);
             segmentsForEdge.add(segment);
+
+            // Create edge contact for the START of this segment (if it had a previous obstacle)
+            if (segmentStartPos > 0) {
+                Point prevPixel = getPixelForEdgePosition(edge, segmentStartPos - 1);
+                ObstacleContactInfo prevContactInfo = getBlockingObstacle(prevPixel.x, prevPixel.y);
+                if (prevContactInfo != null) {
+                    createEdgeContact(prevContactInfo, edge, segmentStart, segment);
+                }
+            }
+            System.out.println("  Edge segment " + segmentStart + "->" + segmentEnd + " extends to edge end");
         }
 
         edgeSegments.addAll(segmentsForEdge);
@@ -362,7 +368,7 @@ public class ZKTerrainAnalyzer {
     }
 
     // Create edge contact with vertex-to-edge snapping logic
-    private void createEdgeContact(ObstacleContactInfo contactInfo, MapEdge edge, Point originalContactPixel) {
+    private void createEdgeContact(ObstacleContactInfo contactInfo, MapEdge edge, Point originalContactPixel, EdgeSegment edgeSegment) {
         if (contactInfo == null) return;
 
         Contour contour = findContourByObstacleId(contactInfo.obstacleId);
@@ -404,8 +410,8 @@ public class ZKTerrainAnalyzer {
         int segmentIndex = findSegmentIndexForContact(contour, contactInfo.vertex1, contactInfo.vertex2);
         if (segmentIndex >= 0) {
             // Add edge contact to contour
-            contour.edgeContacts.add(new Contour.EdgeContact(finalContactPoint, segmentIndex));
-            System.out.println("  Added edge contact: " + finalContactPoint + " on segment " + segmentIndex + " of contour (obstacle " + contactInfo.obstacleId + ")");
+            contour.edgeContacts.add(new Contour.EdgeContact(finalContactPoint, segmentIndex, edgeSegment));
+            System.out.println("  Added edge contact: " + finalContactPoint + " on segment " + segmentIndex + " of contour (obstacle " + contactInfo.obstacleId + ") connected to edge segment " + edgeSegment.start + "->" + edgeSegment.end);
 
             // TODO: Handle segment splitting if needsSegmentSplit is true
             if (needsSegmentSplit) {
