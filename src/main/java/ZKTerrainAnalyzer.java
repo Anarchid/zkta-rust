@@ -392,12 +392,26 @@ public class ZKTerrainAnalyzer {
             // Snap vertex1 to the original contact pixel and mark it as edgy
             finalContactPoint = originalContactPixel;
             snapVertexToEdgeContact(contour, contactInfo.vertex1, originalContactPixel);
+            // Update EdgeSegment to reference the actual snapped contour vertex
+            if (edgeSegment.start.equals(contactInfo.vertex1)) {
+                edgeSegment.start = contactInfo.vertex1;  // Use the contour vertex itself
+            }
+            if (edgeSegment.end.equals(contactInfo.vertex1)) {
+                edgeSegment.end = contactInfo.vertex1;  // Use the contour vertex itself
+            }
             needsSegmentSplit = false;
             System.out.println("  Snapped vertex1 " + contactInfo.vertex1 + " to edge contact " + originalContactPixel);
         } else if (distToVertex2 <= threshold) {
             // Snap vertex2 to the original contact pixel and mark it as edgy
             finalContactPoint = originalContactPixel;
             snapVertexToEdgeContact(contour, contactInfo.vertex2, originalContactPixel);
+            // Update EdgeSegment to reference the actual snapped contour vertex
+            if (edgeSegment.start.equals(contactInfo.vertex2)) {
+                edgeSegment.start = contactInfo.vertex2;  // Use the contour vertex itself
+            }
+            if (edgeSegment.end.equals(contactInfo.vertex2)) {
+                edgeSegment.end = contactInfo.vertex2;  // Use the contour vertex itself
+            }
             needsSegmentSplit = false;
             System.out.println("  Snapped vertex2 " + contactInfo.vertex2 + " to edge contact " + originalContactPixel);
         } else {
@@ -406,19 +420,38 @@ public class ZKTerrainAnalyzer {
             System.out.println("  Using midpoint contact " + edgeContactPoint + " (will require segment split)");
         }
 
-        // Find the segment index for this contact
-        int segmentIndex = findSegmentIndexForContact(contour, contactInfo.vertex1, contactInfo.vertex2);
-        if (segmentIndex >= 0) {
-            // Add edge contact to contour
-            contour.edgeContacts.add(new Contour.EdgeContact(finalContactPoint, segmentIndex, edgeSegment));
-            System.out.println("  Added edge contact: " + finalContactPoint + " on segment " + segmentIndex + " of contour (obstacle " + contactInfo.obstacleId + ") connected to edge segment " + edgeSegment.start + "->" + edgeSegment.end);
+        if (needsSegmentSplit) {
+            // Split the segment by inserting the contact point as a new vertex
+            Point newVertex = insertPointIntoContour(contour, contactInfo.vertex1, contactInfo.vertex2, finalContactPoint);
+            if (newVertex != null) {
+                // Update EdgeSegment to reference the new vertex directly
+                if (edgeSegment.start.equals(originalContactPixel)) {
+                    edgeSegment.start = newVertex;
+                    System.out.println("  Updated EdgeSegment start to reference new vertex " + newVertex);
+                }
+                if (edgeSegment.end.equals(originalContactPixel)) {
+                    edgeSegment.end = newVertex;
+                    System.out.println("  Updated EdgeSegment end to reference new vertex " + newVertex);
+                }
 
-            // TODO: Handle segment splitting if needsSegmentSplit is true
-            if (needsSegmentSplit) {
-                System.out.println("  TODO: Implement segment splitting for midpoint contact");
+                // Still need to store EdgeContact to maintain EdgeSegment reference for regions
+                // Find the new segment index after insertion
+                int newSegmentIndex = findSegmentIndexForVertex(contour, newVertex);
+                if (newSegmentIndex >= 0) {
+                    contour.edgeContacts.add(new Contour.EdgeContact(newVertex, newSegmentIndex, edgeSegment));
+                    System.out.println("  Split segment and added edge contact for EdgeSegment tracking");
+                }
             }
         } else {
-            System.out.println("  Warning: Could not find segment for contact vertices in contour");
+            // For snapped contacts, still store as edge contact for tracking
+            int segmentIndex = findSegmentIndexForContact(contour, contactInfo.vertex1, contactInfo.vertex2);
+            if (segmentIndex >= 0) {
+                // Add edge contact to contour
+                contour.edgeContacts.add(new Contour.EdgeContact(finalContactPoint, segmentIndex, edgeSegment));
+                System.out.println("  Added edge contact: " + finalContactPoint + " on segment " + segmentIndex + " of contour (obstacle " + contactInfo.obstacleId + ") connected to edge segment " + edgeSegment.start + "->" + edgeSegment.end);
+            } else {
+                System.out.println("  Warning: Could not find segment for contact vertices in contour");
+            }
         }
     }
 
@@ -437,6 +470,16 @@ public class ZKTerrainAnalyzer {
         System.out.println("    Warning: Target vertex " + targetVertex + " not found in contour");
     }
 
+    // Find the segment index for a specific vertex (vertex is the start of the segment)
+    private int findSegmentIndexForVertex(Contour contour, Point vertex) {
+        for (int i = 0; i < contour.points.size(); i++) {
+            if (contour.points.get(i).equals(vertex)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     // Find the segment index that contains the given vertices
     private int findSegmentIndexForContact(Contour contour, Point vertex1, Point vertex2) {
         for (int i = 0; i < contour.points.size() - 1; i++) {
@@ -450,6 +493,51 @@ public class ZKTerrainAnalyzer {
             }
         }
         return -1; // Segment not found
+    }
+
+    // Insert a point into the contour between two vertices and return the new vertex
+    private Point insertPointIntoContour(Contour contour, Point vertex1, Point vertex2, Point contactPoint) {
+        // Find the position to insert the contact point
+        for (int i = 0; i < contour.points.size(); i++) {
+            Point p1 = contour.points.get(i);
+            Point p2 = contour.points.get((i + 1) % contour.points.size());
+
+            // Check if this segment matches our vertices (either direction)
+            if ((p1.equals(vertex1) && p2.equals(vertex2)) ||
+                (p1.equals(vertex2) && p2.equals(vertex1))) {
+
+                // Insert the contact point after p1 (at position i+1)
+                Point newVertex = new Point(contactPoint.x, contactPoint.y);
+                contour.points.add(i + 1, newVertex);
+
+                System.out.println("    Inserted contact point " + contactPoint + " as new vertex at index " + (i + 1));
+
+                // Update segment indices for all existing contacts after this insertion
+                updateSegmentIndicesAfterInsertion(contour, i);
+
+                return newVertex;
+            }
+        }
+
+        System.out.println("    Warning: Could not find segment for vertices " + vertex1 + " and " + vertex2);
+        return null;
+    }
+
+    // Update segment indices for existing contacts after a point insertion
+    private void updateSegmentIndicesAfterInsertion(Contour contour, int insertionIndex) {
+        // Update edge contacts
+        for (Contour.EdgeContact contact : contour.edgeContacts) {
+            if (contact.segmentIndex > insertionIndex) {
+                contact.segmentIndex++;
+            }
+        }
+
+        // Update chokepoint contacts
+        for (Contour.ChokepointContact contact : contour.chokepointContacts) {
+            if (contact.segmentIndex > insertionIndex) {
+                contact.segmentIndex++;
+            }
+        }
     }
 
     // Debug: Split debug edge segments at chokepoint contact points
