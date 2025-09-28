@@ -61,11 +61,19 @@ public class RegionGraphPlotter {
         ArrayList<Segment> segments = new ArrayList<>();
         Map<Point, Integer> nodeDegrees = new HashMap<>();
         Map<Point, ArrayList<Point>> adjacency = new HashMap<>();
+        Map<Point, Integer> nodeIds = new HashMap<>();  // Map vertices to IDs
+        int nextNodeId = 0;
 
         void addSegment(Segment segment) {
             segments.add(segment);
-            nodes.add(segment.start);
-            nodes.add(segment.end);
+
+            // Add nodes and assign IDs if new
+            if (nodes.add(segment.start)) {
+                nodeIds.put(segment.start, nextNodeId++);
+            }
+            if (nodes.add(segment.end)) {
+                nodeIds.put(segment.end, nextNodeId++);
+            }
 
             nodeDegrees.put(segment.start, nodeDegrees.getOrDefault(segment.start, 0) + 1);
             nodeDegrees.put(segment.end, nodeDegrees.getOrDefault(segment.end, 0) + 1);
@@ -447,6 +455,7 @@ public class RegionGraphPlotter {
         g.fillRect(0, 0, width, height);
 
         // Draw segments
+        int edgeSegmentCounter = 1;
         for (Segment segment : graph.segments) {
             g.setColor(segment.color);
             g.setStroke(new BasicStroke(2.0f));
@@ -457,6 +466,28 @@ public class RegionGraphPlotter {
             int y2 = segment.end.y - minY + padding;
 
             g.drawLine(x1, y1, x2, y2);
+
+            // Label edge segments
+            if (segment.source.startsWith("edge")) {
+                g.setColor(Color.BLACK);
+                g.setFont(new Font("Arial", Font.BOLD, 12));
+                int midX = (x1 + x2) / 2;
+                int midY = (y1 + y2) / 2;
+                String label = "E" + edgeSegmentCounter;
+
+                // Add background rectangle for better readability
+                FontMetrics fm = g.getFontMetrics();
+                int labelWidth = fm.stringWidth(label);
+                int labelHeight = fm.getHeight();
+                g.setColor(Color.WHITE);
+                g.fillRect(midX - labelWidth/2 - 2, midY - labelHeight/2 - 1, labelWidth + 4, labelHeight + 2);
+                g.setColor(Color.BLACK);
+                g.drawRect(midX - labelWidth/2 - 2, midY - labelHeight/2 - 1, labelWidth + 4, labelHeight + 2);
+
+                // Draw the label
+                g.drawString(label, midX - labelWidth/2, midY + fm.getAscent()/2);
+                edgeSegmentCounter++;
+            }
         }
 
         // Draw Dijkstra path if found
@@ -507,6 +538,20 @@ public class RegionGraphPlotter {
             }
 
             g.fillOval(x - nodeSize/2, y - nodeSize/2, nodeSize, nodeSize);
+        }
+
+        // Draw vertex IDs
+        g.setFont(new Font("Arial", Font.PLAIN, 10));
+        g.setColor(Color.DARK_GRAY);
+        for (Point node : graph.nodes) {
+            Integer nodeId = graph.nodeIds.get(node);
+            if (nodeId != null) {
+                int x = node.x - minX + padding;
+                int y = node.y - minY + padding;
+
+                // Draw ID slightly offset from the node
+                g.drawString(String.valueOf(nodeId), x + 5, y - 5);
+            }
         }
 
         // Add legend
