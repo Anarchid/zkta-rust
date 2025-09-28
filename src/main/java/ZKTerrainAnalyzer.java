@@ -509,11 +509,14 @@ public class ZKTerrainAnalyzer {
         System.out.println("    SNAP DEBUG: Contour size unchanged: " + contour.points.size());
 
         // Update EdgeSegment to reference the actual obstacle vertex (reverse snapping)
-        if (edgeSegment.start.equals(originalContactPixel)) {
+        // Check if EdgeSegment endpoints are within threshold distance of the contact point
+        double threshold = 3.0; // Same threshold as edge blocking detection
+
+        if (distance(edgeSegment.start, originalContactPixel) <= threshold) {
             edgeSegment.start = actualVertex;  // Use the actual obstacle vertex
             System.out.println("    REVERSE_SNAP: Updated EdgeSegment start to use obstacle vertex " + actualVertex);
         }
-        if (edgeSegment.end.equals(originalContactPixel)) {
+        if (distance(edgeSegment.end, originalContactPixel) <= threshold) {
             edgeSegment.end = actualVertex;    // Use the actual obstacle vertex
             System.out.println("    REVERSE_SNAP: Updated EdgeSegment end to use obstacle vertex " + actualVertex);
         }
