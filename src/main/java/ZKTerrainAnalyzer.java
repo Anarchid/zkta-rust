@@ -1907,12 +1907,13 @@ public class ZKTerrainAnalyzer {
     }
 
     private ArrayList<Point> fillGapWithMapEdgeTracing(Point start, Point end, Region region) {
-        System.out.println("    EDGY: Map edge tracing - marking contacts as visited (no segment building)");
+        System.out.println("    EDGY: Map edge tracing - building actual edge segment between contacts");
 
-        // Find the edge contacts for start and end points
+        // Find the edge contacts for start and end points (try exact match first, then nearby)
         MapEdgeContact startContact = null;
         MapEdgeContact endContact = null;
 
+        // First try exact matches
         for (MapEdgeContact contact : region.edgeContacts) {
             if (contact.contactPoint.equals(start)) {
                 startContact = contact;
@@ -1922,8 +1923,27 @@ public class ZKTerrainAnalyzer {
             }
         }
 
+        // If exact match failed, find the nearest edge contacts
+        if (startContact == null) {
+            startContact = findNearestEdgeContact(start, region, 10.0); // 10 pixel threshold
+            if (startContact != null) {
+                System.out.println("    EDGY: Using nearby edge contact " + startContact.contactPoint + " for start point " + start);
+            }
+        }
+
+        if (endContact == null) {
+            endContact = findNearestEdgeContact(end, region, 10.0); // 10 pixel threshold
+            if (endContact != null) {
+                System.out.println("    EDGY: Using nearby edge contact " + endContact.contactPoint + " for end point " + end);
+            }
+        }
+
         if (startContact == null || endContact == null) {
             System.out.println("    EDGY: Could not find edge contacts for start=" + start + " end=" + end);
+            System.out.println("    EDGY: Available edge contacts for this region:");
+            for (MapEdgeContact contact : region.edgeContacts) {
+                System.out.println("      - " + contact.contactPoint + " on " + contact.edge + " edge");
+            }
             return null;
         }
 
@@ -1956,9 +1976,92 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        // Don't build any actual segments - just return null to indicate no boundary segment
-        System.out.println("    EDGY: Contacts marked, returning null (no segment building)");
-        return null;
+        // Now build the actual edge segment points between start and end
+        ArrayList<Point> edgeSegment = buildEdgeSegmentPoints(start, end, edge);
+        if (edgeSegment != null && !edgeSegment.isEmpty()) {
+            System.out.println("    EDGY: Built edge segment with " + edgeSegment.size() + " points from " + start + " to " + end);
+            return edgeSegment;
+        } else {
+            System.out.println("    EDGY: Failed to build edge segment points");
+            return null;
+        }
+    }
+
+    // Build actual points along the map edge between start and end points
+    private ArrayList<Point> buildEdgeSegmentPoints(Point start, Point end, MapEdge edge) {
+        ArrayList<Point> points = new ArrayList<>();
+
+        switch (edge) {
+            case TOP:
+                // Generate points along top edge from start.x to end.x at y=0
+                int startX = Math.min(start.x, end.x);
+                int endX = Math.max(start.x, end.x);
+                for (int x = startX; x <= endX; x++) {
+                    points.add(new Point(x, 0));
+                }
+                // Reverse if we need to go from right to left
+                if (start.x > end.x) {
+                    Collections.reverse(points);
+                }
+                break;
+
+            case BOTTOM:
+                // Generate points along bottom edge from start.x to end.x at y=height-1
+                startX = Math.min(start.x, end.x);
+                endX = Math.max(start.x, end.x);
+                for (int x = startX; x <= endX; x++) {
+                    points.add(new Point(x, height - 1));
+                }
+                // Reverse if we need to go from right to left
+                if (start.x > end.x) {
+                    Collections.reverse(points);
+                }
+                break;
+
+            case LEFT:
+                // Generate points along left edge from start.y to end.y at x=0
+                int startY = Math.min(start.y, end.y);
+                int endY = Math.max(start.y, end.y);
+                for (int y = startY; y <= endY; y++) {
+                    points.add(new Point(0, y));
+                }
+                // Reverse if we need to go from bottom to top
+                if (start.y > end.y) {
+                    Collections.reverse(points);
+                }
+                break;
+
+            case RIGHT:
+                // Generate points along right edge from start.y to end.y at x=width-1
+                startY = Math.min(start.y, end.y);
+                endY = Math.max(start.y, end.y);
+                for (int y = startY; y <= endY; y++) {
+                    points.add(new Point(width - 1, y));
+                }
+                // Reverse if we need to go from bottom to top
+                if (start.y > end.y) {
+                    Collections.reverse(points);
+                }
+                break;
+        }
+
+        return points;
+    }
+
+    // Find the nearest edge contact to a given point within the threshold distance
+    private MapEdgeContact findNearestEdgeContact(Point point, Region region, double threshold) {
+        MapEdgeContact nearest = null;
+        double minDistance = Double.MAX_VALUE;
+
+        for (MapEdgeContact contact : region.edgeContacts) {
+            double dist = distance(point, contact.contactPoint);
+            if (dist <= threshold && dist < minDistance) {
+                minDistance = dist;
+                nearest = contact;
+            }
+        }
+
+        return nearest;
     }
 
     private MapEdge getEdgeForContact(Point point, Region region) {
@@ -2963,8 +3066,286 @@ public class ZKTerrainAnalyzer {
         return true;
     }
 
+    // Helper classes for region graph algorithm
+    private static class RegionSubgraph {
+        ArrayList<Point> vertices = new ArrayList<>();
+        ArrayList<Segment> segments = new ArrayList<>();
+        HashMap<Point, ArrayList<Point>> adjacency = new HashMap<>();
+
+        static class Segment {
+            Point start, end;
+            String type;
+            double length;
+
+            Segment(Point start, Point end, String type) {
+                this.start = start;
+                this.end = end;
+                this.type = type;
+                this.length = Math.sqrt(Math.pow(start.x - end.x, 2) + Math.pow(start.y - end.y, 2));
+            }
+        }
+
+        void addVertex(Point vertex) {
+            // Use coordinate-based containment check since Point.equals() might not work as expected
+            boolean found = false;
+            for (Point existing : vertices) {
+                if (existing.x == vertex.x && existing.y == vertex.y) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                vertices.add(vertex);
+                adjacency.put(vertex, new ArrayList<>());
+            }
+        }
+
+        void addSegment(Point start, Point end, String type) {
+            addVertex(start);
+            addVertex(end);
+            segments.add(new Segment(start, end, type));
+
+            // Find the actual vertex objects in the list (in case Point.equals() isn't working properly)
+            Point startVertex = null, endVertex = null;
+            for (Point v : vertices) {
+                if (v.x == start.x && v.y == start.y) {
+                    startVertex = v;
+                }
+                if (v.x == end.x && v.y == end.y) {
+                    endVertex = v;
+                }
+            }
+
+            // Add bidirectional connectivity using the actual vertex objects
+            if (startVertex != null && endVertex != null) {
+                if (!adjacency.get(startVertex).contains(endVertex)) {
+                    adjacency.get(startVertex).add(endVertex);
+                }
+                if (!adjacency.get(endVertex).contains(startVertex)) {
+                    adjacency.get(endVertex).add(startVertex);
+                }
+            }
+        }
+
+        Segment findSegment(Point p1, Point p2) {
+            for (Segment segment : segments) {
+                if ((segment.start.equals(p1) && segment.end.equals(p2)) ||
+                    (segment.start.equals(p2) && segment.end.equals(p1))) {
+                    return segment;
+                }
+            }
+            return null;
+        }
+    }
+
+    private static class DijkstraResult {
+        boolean pathFound = false;
+        ArrayList<Point> path = new ArrayList<>();
+        double pathLength = 0.0;
+        Point start, goal;
+        RegionSubgraph.Segment prohibitedSegment;
+
+        DijkstraResult(Point start, Point goal, RegionSubgraph.Segment prohibitedSegment) {
+            this.start = start;
+            this.goal = goal;
+            this.prohibitedSegment = prohibitedSegment;
+        }
+    }
+
+    private RegionSubgraph buildRegionSubgraph(Node regionNode, RegionGraph graph) {
+        RegionSubgraph subgraph = new RegionSubgraph();
+
+        // Find all chokepoints connected to this region
+        for (Node neighbor : regionNode.neighbours) {
+            if (graph.chokepointNodes.contains(neighbor)) {
+                // Find the Chokepoint object for this node
+                Chokepoint chokepoint = null;
+                for (Chokepoint cp : graph.chokepoints) {
+                    if (cp.node == neighbor) {
+                        chokepoint = cp;
+                        break;
+                    }
+                }
+
+                if (chokepoint != null && chokepoint.crossingPoints != null && chokepoint.crossingPoints.length >= 2) {
+                    // Add chokepoint segment
+                    Point start = chokepoint.crossingPoints[0];
+                    Point end = chokepoint.crossingPoints[1];
+                    subgraph.addSegment(start, end, "chokepoint");
+
+                    // Add obstacle segments connected to these chokepoint vertices
+                    addObstacleSegmentsForChokepoint(subgraph, chokepoint, regionNode, graph);
+                }
+            }
+        }
+
+        // Add edge segments if this is an edgy region
+        if (edgyRegionMap.containsKey(regionNode)) {
+            ArrayList<MapEdgeContact> regionContacts = edgyRegionMap.get(regionNode);
+            for (MapEdgeContact contact : regionContacts) {
+                addEdgeSegmentsForContact(subgraph, contact);
+            }
+        }
+
+        return subgraph;
+    }
+
+    private void addObstacleSegmentsForChokepoint(RegionSubgraph subgraph, Chokepoint chokepoint, Node regionNode, RegionGraph graph) {
+        if (chokepoint.crossingPoints == null || chokepoint.obstacleIds == null) return;
+
+        for (int i = 0; i < chokepoint.crossingPoints.length; i++) {
+            Point contactPoint = chokepoint.crossingPoints[i];
+            Integer obstacleId = chokepoint.obstacleIds[i];
+
+            // Find the contour for this obstacle
+            Contour obstacleContour = getContourForObstacleId(obstacleId);
+            if (obstacleContour == null) continue;
+
+            // Add segments along the obstacle contour from this contact point
+            addObstacleContourSegments(subgraph, obstacleContour, contactPoint, obstacleId);
+        }
+    }
+
+    private void addEdgeSegmentsForContact(RegionSubgraph subgraph, MapEdgeContact contact) {
+        // Add edge segments connecting this contact to other edge points
+        // For now, we'll create segments along the map edge
+        Point contactPoint = contact.contactPoint;
+
+        // Add segments to map boundary corners based on edge type
+        MapEdge edge = contact.edge;
+        switch (edge) {
+            case TOP: // TOP edge
+                subgraph.addSegment(contactPoint, new Point(0, 0), "edge");
+                subgraph.addSegment(contactPoint, new Point(width - 1, 0), "edge");
+                break;
+            case RIGHT: // RIGHT edge
+                subgraph.addSegment(contactPoint, new Point(width - 1, 0), "edge");
+                subgraph.addSegment(contactPoint, new Point(width - 1, height - 1), "edge");
+                break;
+            case BOTTOM: // BOTTOM edge
+                subgraph.addSegment(contactPoint, new Point(0, height - 1), "edge");
+                subgraph.addSegment(contactPoint, new Point(width - 1, height - 1), "edge");
+                break;
+            case LEFT: // LEFT edge
+                subgraph.addSegment(contactPoint, new Point(0, 0), "edge");
+                subgraph.addSegment(contactPoint, new Point(0, height - 1), "edge");
+                break;
+        }
+    }
+
+    private void addObstacleContourSegments(RegionSubgraph subgraph, Contour contour, Point startPoint, Integer obstacleId) {
+        // Find the closest point on the contour to the start point
+        int startIndex = findClosestPointIndex(contour, startPoint);
+
+        // Add segments around the entire contour
+        for (int i = 0; i < contour.length(); i++) {
+            Point p1 = contour.getPoint(i);
+            Point p2 = contour.getPoint((i + 1) % contour.length());
+            subgraph.addSegment(p1, p2, "obstacle_" + obstacleId);
+        }
+    }
+
+    private Contour getContourForObstacleId(Integer obstacleId) {
+        if (obstacleId >= 1000) {
+            // Simplified contour obstacle IDs start at 1000
+            int contourIndex = obstacleId - 1000;
+            if (contourIndex < simplifiedContours.size()) {
+                return simplifiedContours.get(contourIndex);
+            }
+        }
+        return null;
+    }
+
+    private int findClosestPointIndex(Contour contour, Point target) {
+        int closest = 0;
+        double minDist = distance(contour.getPoint(0), target);
+
+        for (int i = 1; i < contour.length(); i++) {
+            double dist = distance(contour.getPoint(i), target);
+            if (dist < minDist) {
+                minDist = dist;
+                closest = i;
+            }
+        }
+
+        return closest;
+    }
+
+    private DijkstraResult runRegionDijkstra(RegionSubgraph subgraph, Point start, Point goal, RegionSubgraph.Segment prohibitedSegment) {
+        DijkstraResult result = new DijkstraResult(start, goal, prohibitedSegment);
+
+        Map<Point, Double> distances = new HashMap<>();
+        Map<Point, Point> previous = new HashMap<>();
+        Set<Point> visited = new HashSet<>();
+
+        // Initialize distances
+        for (Point vertex : subgraph.vertices) {
+            distances.put(vertex, Double.POSITIVE_INFINITY);
+        }
+        distances.put(start, 0.0);
+
+        while (true) {
+            // Find unvisited vertex with minimum distance
+            Point current = null;
+            double minDistance = Double.POSITIVE_INFINITY;
+            for (Point vertex : subgraph.vertices) {
+                if (!visited.contains(vertex) && distances.get(vertex) < minDistance) {
+                    minDistance = distances.get(vertex);
+                    current = vertex;
+                }
+            }
+
+            if (current == null || minDistance == Double.POSITIVE_INFINITY) {
+                break; // No more reachable vertices
+            }
+
+            visited.add(current);
+
+            if (current.equals(goal)) {
+                // Reconstruct path
+                ArrayList<Point> path = new ArrayList<>();
+                Point step = goal;
+                while (step != null) {
+                    path.add(0, step);
+                    step = previous.get(step);
+                }
+                result.path = path;
+                result.pathLength = distances.get(goal);
+                result.pathFound = true;
+                break;
+            }
+
+            // Check neighbors
+            ArrayList<Point> neighbors = subgraph.adjacency.get(current);
+            if (neighbors != null) {
+                for (Point neighbor : neighbors) {
+                    if (visited.contains(neighbor)) continue;
+
+                    // Check if this edge is prohibited
+                    RegionSubgraph.Segment edge = subgraph.findSegment(current, neighbor);
+                    if (prohibitedSegment != null && edge != null &&
+                        ((edge.start.equals(prohibitedSegment.start) && edge.end.equals(prohibitedSegment.end)) ||
+                         (edge.start.equals(prohibitedSegment.end) && edge.end.equals(prohibitedSegment.start)))) {
+                        continue; // Skip prohibited segment
+                    }
+
+                    double edgeLength = distance(current, neighbor);
+                    double newDistance = distances.get(current) + edgeLength;
+
+                    if (newDistance < distances.get(neighbor)) {
+                        distances.put(neighbor, newDistance);
+                        previous.put(neighbor, current);
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
+
     private void buildRegionBoundariesFromChokepoints(RegionGraph graph) {
-        System.out.println("Building region boundaries from chokepoint contacts...");
+        System.out.println("Building region boundaries using RegionGraphPlotter-identical algorithm...");
 
         // Clear existing region list
         regionList.clear();
@@ -2977,11 +3358,8 @@ public class ZKTerrainAnalyzer {
 
             // Create Region object
             Region region = new Region(regionNode, regionId++);
-            ArrayList<Point> boundaryPoints = new ArrayList<>();
 
             // Transfer edgy information from HashMap to region
-            System.out.println("  DEBUG: Checking edgyRegionMap for node @" + regionNode.position +
-                             " (hashCode=" + regionNode.hashCode() + ", id=" + System.identityHashCode(regionNode) + ")");
             if (edgyRegionMap.containsKey(regionNode)) {
                 ArrayList<MapEdgeContact> regionContacts = edgyRegionMap.get(regionNode);
                 region.isEdgy = true;
@@ -2989,19 +3367,6 @@ public class ZKTerrainAnalyzer {
                     region.addEdgeContact(contact);
                 }
                 System.out.println("  Region marked as EDGY with " + region.edgeContacts.size() + " edge contacts");
-            } else {
-                System.out.println("  DEBUG: Node not found in edgyRegionMap!");
-                // Debug: Show all keys in the map for comparison
-                System.out.println("  DEBUG: Available keys in edgyRegionMap (" + edgyRegionMap.size() + " total):");
-                for (Node key : edgyRegionMap.keySet()) {
-                    if (key.position.equals(regionNode.position)) {
-                        System.out.println("    MATCH by position: @" + key.position +
-                                         " (hashCode=" + key.hashCode() + ", id=" + System.identityHashCode(key) + ") - different objects!");
-                    } else {
-                        System.out.println("    Different position: @" + key.position +
-                                         " (hashCode=" + key.hashCode() + ", id=" + System.identityHashCode(key) + ")");
-                    }
-                }
             }
 
             // Find all chokepoints connected to this region
@@ -3021,184 +3386,58 @@ public class ZKTerrainAnalyzer {
 
             System.out.println("  Found " + connectedChokepoints.size() + " connected chokepoints");
 
-            // Group chokepoint contacts by obstacle ID
-            HashMap<Integer, ArrayList<ChokepointContact>> obstacleContacts = new HashMap<>();
+            // Step 1: Collect all vertices and segments from all features relevant to this region
+            RegionSubgraph subgraph = buildRegionSubgraph(regionNode, graph);
+            System.out.println("  Built subgraph with " + subgraph.vertices.size() + " vertices and " + subgraph.segments.size() + " segments");
 
-            for (Node chokepointNode : connectedChokepoints) {
-                // Find the Chokepoint object for this node
-                Chokepoint chokepoint = null;
-                for (Chokepoint cp : graph.chokepoints) {
-                    if (cp.node == chokepointNode) {
-                        chokepoint = cp;
-                        break;
-                    }
-                }
-
-                if (chokepoint != null && chokepoint.crossingPoints != null) {
-                    // Add both contact points to the obstacle map
-                    for (int i = 0; i < chokepoint.crossingPoints.length; i++) {
-                        Integer obstacleId = chokepoint.obstacleIds[i];
-                        Point contactPoint = chokepoint.crossingPoints[i];
-
-                        if (!obstacleContacts.containsKey(obstacleId)) {
-                            obstacleContacts.put(obstacleId, new ArrayList<>());
-                        }
-
-                        obstacleContacts.get(obstacleId).add(
-                            new ChokepointContact(chokepointNode, contactPoint, obstacleId)
-                        );
-                    }
-                }
-            }
-
-            // Track which segments we've already added to avoid duplicates
-            HashSet<String> addedSegments = new HashSet<>();
-
-            // Store path segments separately to preserve connectivity
-            ArrayList<ArrayList<Point>> pathSegments = new ArrayList<>();
-
-            // For each obstacle that this region touches
-            for (Map.Entry<Integer, ArrayList<ChokepointContact>> entry : obstacleContacts.entrySet()) {
-                Integer obstacleId = entry.getKey();
-                ArrayList<ChokepointContact> contacts = entry.getValue();
-
-                if (contacts.size() < 2) {
-                    System.out.println("  WARNING: Obstacle " + obstacleId + " has only " +
-                                     contacts.size() + " contact point(s), skipping");
-                    continue;
-                }
-
-                System.out.println("  Processing obstacle " + obstacleId + " with " +
-                                 contacts.size() + " contact points");
-
-                // Find the contour for this obstacle
-                Contour obstacleContour = null;
-                int contourIndex = -1;
-
-                // Map obstacle IDs to contour indices
-                if (obstacleId >= 1000) {
-                    // Simplified contour obstacle IDs start at 1000
-                    contourIndex = obstacleId - 1000;
-                    if (contourIndex < simplifiedContours.size()) {
-                        obstacleContour = simplifiedContours.get(contourIndex);
-                    }
-                } else if (obstacleId < 4) {
-                    // Map boundary IDs (0-3) - these don't have contours
-                    System.out.println("    Skipping boundary obstacle " + obstacleId);
-                    continue;
-                }
-
-                if (obstacleContour == null) {
-                    System.out.println("    WARNING: Could not find contour for obstacle " + obstacleId);
-                    continue;
-                }
-
-                // For each pair of contact points on this obstacle
-                for (int i = 0; i < contacts.size(); i++) {
-                    for (int j = i + 1; j < contacts.size(); j++) {
-                        ChokepointContact contact1 = contacts.get(i);
-                        ChokepointContact contact2 = contacts.get(j);
-
-                        // Find the shortest path along the obstacle boundary
-                        ArrayList<Point> pathSegment = findShortestPathAlongContour(
-                            obstacleContour, contact1.contactPoint, contact2.contactPoint, addedSegments, region
-                        );
-
-                        if (pathSegment != null && !pathSegment.isEmpty()) {
-                            pathSegments.add(pathSegment);
-                            System.out.println("    Added path from " + contact1.contactPoint +
-                                             " to " + contact2.contactPoint +
-                                             " (" + pathSegment.size() + " points)");
-                        }
-                    }
-                }
-            }
-
-            // Add chokepoint crossing segments to connect obstacle segments
-            for (Node chokepointNode : connectedChokepoints) {
-                // Find the Chokepoint object for this node
-                Chokepoint chokepoint = null;
-                for (Chokepoint cp : graph.chokepoints) {
-                    if (cp.node == chokepointNode) {
-                        chokepoint = cp;
-                        break;
-                    }
-                }
-
-                if (chokepoint != null && chokepoint.crossingPoints != null && chokepoint.crossingPoints.length >= 2) {
-                    // Add the chokepoint crossing segment
-                    ArrayList<Point> chokepointSegment = new ArrayList<>();
-                    chokepointSegment.add(chokepoint.crossingPoints[0]);
-                    chokepointSegment.add(chokepoint.crossingPoints[1]);
-                    pathSegments.add(chokepointSegment);
-                    System.out.println("    Added chokepoint segment from " +
-                                     chokepoint.crossingPoints[0] + " to " + chokepoint.crossingPoints[1] + " (2 points)");
-                }
-            }
-
-            // Build connected boundary from segments
-            ArrayList<Point> connectedBoundary = buildConnectedBoundary(pathSegments);
-            boolean boundaryWasConnected = false;
-            if (connectedBoundary != null) {
-                boundaryPoints = connectedBoundary;
-                boundaryWasConnected = true;
-            } else if (region.isEdgy) {
-                // For edgy regions, try to fill gaps with map edge tracing
-                System.out.println("  EDGY REGION: Attempting to fill gaps with map edge tracing");
-                connectedBoundary = buildConnectedBoundaryWithMapEdges(pathSegments, region);
-                if (connectedBoundary != null) {
-                    boundaryPoints = connectedBoundary;
-                    boundaryWasConnected = true;
-                } else {
-                    System.out.println("  WARNING: Could not build connected boundary even with map edge tracing");
-                    // Store partial segments for visualization
-                    region.partialSegments = new ArrayList<>(pathSegments);
-                    boundaryWasConnected = false;
-                }
-            } else {
-                System.out.println("  WARNING: Could not build connected boundary from segments");
-                // Store partial segments for visualization
-                region.partialSegments = new ArrayList<>(pathSegments);
-                boundaryWasConnected = false;
-            }
-
-
-            // Set the boundary polygon for the region
-            if (!boundaryPoints.isEmpty()) {
-                // Use boundary points directly - they're already in the correct order
-                // from tracing along obstacle contours
-                region.setPolygon(boundaryPoints);
-
-                // Only check connectivity if we successfully built a connected boundary
-                // Otherwise, these are just disconnected partial segments
-                boolean isClosed = false;
-                if (boundaryWasConnected) {
-                    // Check if the boundary forms a closed polygon
-                    // A boundary is considered closed if consecutive points are connected
-                    // (no large gaps between them)
-                    isClosed = checkBoundaryConnectivity(boundaryPoints);
-                }
-                region.isClosed = isClosed;
-
-                System.out.println("  Generated region boundary with " + boundaryPoints.size() +
-                                 " points (" + (isClosed ? "CLOSED" : "OPEN") + ")");
-            } else if (region.partialSegments != null && !region.partialSegments.isEmpty()) {
-                // No connected boundary, but we have partial segments for visualization
-                region.isClosed = false;
-                System.out.println("  No connected boundary, but have " + region.partialSegments.size() + " partial segments");
-            } else {
-                // No valid boundary paths found - skip this region
-                System.out.println("  No valid boundary paths found - skipping region");
+            if (subgraph.segments.isEmpty()) {
+                System.out.println("  No segments found - skipping region");
                 continue;
+            }
+
+            // Step 2: Select the first chokepoint segment in this collection
+            RegionSubgraph.Segment chokepointSegment = null;
+            for (RegionSubgraph.Segment segment : subgraph.segments) {
+                if (segment.type.equals("chokepoint")) {
+                    chokepointSegment = segment;
+                    break;
+                }
+            }
+
+            if (chokepointSegment == null) {
+                System.out.println("  No chokepoint segments found - region cannot be closed");
+                region.isClosed = false;
+                regionList.add(region);
+                continue;
+            }
+
+            System.out.println("  Selected chokepoint segment: " + chokepointSegment.start + " -> " + chokepointSegment.end);
+
+            // Step 3: Use vertex 1 as START for Dijkstra
+            Point start = chokepointSegment.start;
+
+            // Step 4: Use vertex 2 as GOAL for Dijkstra
+            Point goal = chokepointSegment.end;
+
+            System.out.println("  Running Dijkstra from " + start + " to " + goal + " while prohibiting chokepoint segment");
+
+            // Step 5: Run Dijkstra while prohibiting the chosen segment
+            DijkstraResult result = runRegionDijkstra(subgraph, start, goal, chokepointSegment);
+
+            // Step 6: If path found, use it as region boundary
+            if (result.pathFound) {
+                System.out.println("  Path found! Region is CLOSED with " + result.path.size() + " boundary points");
+                region.setPolygon(result.path);
+                region.isClosed = true;
+            } else {
+                System.out.println("  No path found - region is OPEN");
+                region.isClosed = false;
             }
 
             regionList.add(region);
         }
 
-        System.out.println("\nGenerated boundaries for " + regionList.size() + " regions");
-
-        // Run diagnostic on region boundaries to identify jagged segments
-        diagnoseBoundarySegments(graph);
+        System.out.println("\nGenerated boundaries for " + regionList.size() + " regions using graph connectivity algorithm");
     }
 
     private void testObstacleContourClosedness() {
