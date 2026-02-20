@@ -47,7 +47,51 @@ public class ZKTAWindow {
             bg.setColor(Color.BLACK);
             bg.fillRect(0, 0, img.getWidth(), img.getHeight());
 
-            // Draw label map (obstacle pixels) - fixed [y][x] indexing
+            // Draw region boundaries FIRST (underneath everything)
+            Random colorRandom = new Random(42);
+            int boundariesDrawn = 0;
+            for (Region region : zkta.getRegionList()) {
+                if (region.polygon != null && region.polygon.size() >= 3) {
+                    float hue = colorRandom.nextFloat();
+                    float saturation = 0.7f + colorRandom.nextFloat() * 0.3f;
+                    float brightness = 0.8f + colorRandom.nextFloat() * 0.2f;
+                    Color regionColor = Color.getHSBColor(hue, saturation, brightness);
+
+                    Point centroid = region.getCenter();
+                    int nudgePixels = 3;
+
+                    int[] xPoints = new int[region.polygon.size()];
+                    int[] yPoints = new int[region.polygon.size()];
+
+                    for (int i = 0; i < region.polygon.size(); i++) {
+                        Point current = region.polygon.get(i);
+                        int dx = centroid.x - current.x;
+                        int dy = centroid.y - current.y;
+                        double dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > 0) {
+                            dx = (int) (nudgePixels * dx / dist);
+                            dy = (int) (nudgePixels * dy / dist);
+                        }
+                        xPoints[i] = current.x + dx;
+                        yPoints[i] = current.y + dy;
+                    }
+
+                    if (region.isClosed) {
+                        Color fillColor = new Color(regionColor.getRed(), regionColor.getGreen(),
+                                                   regionColor.getBlue(), 64);
+                        bg.setColor(fillColor);
+                        bg.fillPolygon(xPoints, yPoints, region.polygon.size());
+                        bg.setColor(regionColor);
+                        bg.setStroke(new BasicStroke(1.0f));
+                        bg.drawPolygon(xPoints, yPoints, region.polygon.size());
+                    }
+
+                    boundariesDrawn++;
+                }
+            }
+            System.out.println("Drew " + boundariesDrawn + " region boundaries");
+
+            // Draw label map (obstacle pixels) - renders on top of region fills
             int[][] lm = zkta.getLabelMap();
             for (int y = 0; y < zkta.getHeight(); y++) {
                 for (int x = 0; x < zkta.getWidth(); x++) {
@@ -128,50 +172,6 @@ public class ZKTAWindow {
                 }
             }
             System.out.println("Drew " + segmentsDrawn + " chokepoint gates");
-
-            // Draw region boundaries (filled polygons)
-            Random colorRandom = new Random(42);
-            int boundariesDrawn = 0;
-            for (Region region : zkta.getRegionList()) {
-                if (region.polygon != null && region.polygon.size() >= 3) {
-                    float hue = colorRandom.nextFloat();
-                    float saturation = 0.7f + colorRandom.nextFloat() * 0.3f;
-                    float brightness = 0.8f + colorRandom.nextFloat() * 0.2f;
-                    Color regionColor = Color.getHSBColor(hue, saturation, brightness);
-
-                    Point centroid = region.getCenter();
-                    int nudgePixels = 3;
-
-                    int[] xPoints = new int[region.polygon.size()];
-                    int[] yPoints = new int[region.polygon.size()];
-
-                    for (int i = 0; i < region.polygon.size(); i++) {
-                        Point current = region.polygon.get(i);
-                        int dx = centroid.x - current.x;
-                        int dy = centroid.y - current.y;
-                        double dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 0) {
-                            dx = (int) (nudgePixels * dx / dist);
-                            dy = (int) (nudgePixels * dy / dist);
-                        }
-                        xPoints[i] = current.x + dx;
-                        yPoints[i] = current.y + dy;
-                    }
-
-                    if (region.isClosed) {
-                        Color fillColor = new Color(regionColor.getRed(), regionColor.getGreen(),
-                                                   regionColor.getBlue(), 64);
-                        bg.setColor(fillColor);
-                        bg.fillPolygon(xPoints, yPoints, region.polygon.size());
-                        bg.setColor(regionColor);
-                        bg.setStroke(new BasicStroke(1.0f));
-                        bg.drawPolygon(xPoints, yPoints, region.polygon.size());
-                    }
-
-                    boundariesDrawn++;
-                }
-            }
-            System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
             // Draw simplified contours in yellow with labels
             bg.setColor(Color.YELLOW);

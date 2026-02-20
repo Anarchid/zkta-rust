@@ -896,17 +896,20 @@ public class ZKTerrainAnalyzer {
     }
 
     private ArrayList<Point> buildSingleContourBoundary(Region region) {
-        // Find nearest obstacle contour
+        // Find nearest obstacle contour and the nearest point index on it
         double minDist = Double.MAX_VALUE;
         Contour nearest = null;
+        int nearestPointIdx = 0;
 
         for (Contour c : simplifiedContours) {
-            for (Point p : c.points) {
-                double d = Math.sqrt(Math.pow(p.x - region.getCenter().x, 2) +
-                    Math.pow(p.y - region.getCenter().y, 2));
+            for (int i = 0; i < c.points.size(); i++) {
+                Point p = c.points.get(i);
+                double d = Math.pow(p.x - region.getCenter().x, 2) +
+                    Math.pow(p.y - region.getCenter().y, 2);
                 if (d < minDist) {
                     minDist = d;
                     nearest = c;
+                    nearestPointIdx = i;
                 }
             }
         }
@@ -923,44 +926,67 @@ public class ZKTerrainAnalyzer {
         }
 
         if (edgeCount == 0 || edgeCount == n) {
-            // Entirely on or off the edge - just return contour
             return new ArrayList<>(nearest.points);
         }
 
-        // Find transition points: where the contour exits the map edge (last on-edge
-        // vertex before an off-edge vertex) and where it enters (first on-edge vertex
-        // after an off-edge vertex). These bound the interior arc.
-        int exitIdx = -1, enterIdx = -1;
+        // Find ALL interior arcs (sequences of off-edge vertices bounded by on-edge transitions).
+        // Each arc starts at an on→off exit vertex and ends at an off→on enter vertex.
+        ArrayList<int[]> arcs = new ArrayList<>(); // [exitIdx, enterIdx]
         for (int i = 0; i < n; i++) {
             int next = (i + 1) % n;
             if (onEdge[i] && !onEdge[next]) {
-                exitIdx = i;  // last on-edge before going interior
-            }
-            if (!onEdge[i] && onEdge[next]) {
-                enterIdx = next;  // first on-edge after interior
+                // Found an exit - scan forward to find the corresponding enter
+                int exitIdx = i;
+                int enterIdx = -1;
+                for (int j = next; ; j = (j + 1) % n) {
+                    if (onEdge[j]) {
+                        enterIdx = j;
+                        break;
+                    }
+                    if (j == i) break; // full loop, shouldn't happen
+                }
+                if (enterIdx >= 0) {
+                    arcs.add(new int[]{exitIdx, enterIdx});
+                }
             }
         }
 
-        if (exitIdx < 0 || enterIdx < 0) {
+        if (arcs.isEmpty()) {
             return new ArrayList<>(nearest.points);
         }
 
-        // The interior arc goes from exitIdx to enterIdx (through the off-edge vertices).
-        // Include the transition vertices themselves (they're on the map edge and serve
-        // as the connection points for the map-edge closure).
-        ArrayList<Point> obstacleArc = new ArrayList<>();
-        for (int i = exitIdx; ; i = (i + 1) % n) {
-            obstacleArc.add(nearest.points.get(i));
-            if (i == enterIdx) break;
+        // Pick the arc that contains (or is nearest to) the closest contour point
+        int[] bestArc = arcs.get(0);
+        if (arcs.size() > 1) {
+            for (int[] arc : arcs) {
+                // Check if nearestPointIdx falls within this arc
+                int exitIdx = arc[0];
+                int enterIdx = arc[1];
+                boolean contains = false;
+                for (int i = exitIdx; ; i = (i + 1) % n) {
+                    if (i == nearestPointIdx) { contains = true; break; }
+                    if (i == enterIdx) break;
+                }
+                if (contains) {
+                    bestArc = arc;
+                    break;
+                }
+            }
         }
 
-        // Now close the boundary with map-edge segments from arc end back to arc start
+        // Extract the interior arc (including the on-edge transition vertices)
+        ArrayList<Point> obstacleArc = new ArrayList<>();
+        for (int i = bestArc[0]; ; i = (i + 1) % n) {
+            obstacleArc.add(nearest.points.get(i));
+            if (i == bestArc[1]) break;
+        }
+
+        // Close the boundary with map-edge segments from arc end back to arc start
         Point arcEnd = obstacleArc.get(obstacleArc.size() - 1);
         Point arcStart = obstacleArc.get(0);
 
         ArrayList<Point> mapPath = getMapEdgePath(arcEnd, arcStart);
         if (mapPath != null && mapPath.size() > 1) {
-            // Skip first point (it's arcEnd, already in boundary)
             for (int i = 1; i < mapPath.size(); i++) {
                 obstacleArc.add(mapPath.get(i));
             }
@@ -1006,27 +1032,82 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        // Build adjacency graph: contour edges + gate edges + map boundary edges
         HashMap<Point, HashSet<Point>> adjGraph = new HashMap<>();
+        Point center = region.getCenter();
 
-        // 1. Add obstacle contour edges
+        // 1. For each obstacle, add only the region-facing arcs between gate points.
+        //    This prevents Dijkstra from going around the wrong side of an obstacle.
         for (int obstacleId : relevantObstacles) {
             Contour c = simplifiedContours.get(obstacleId - 1);
-            for (int i = 0; i < c.points.size(); i++) {
-                Point p1 = c.points.get(i);
-                Point p2 = c.points.get((i + 1) % c.points.size());
-                addBidirectionalEdge(adjGraph, p1, p2);
+
+            // Find all gate crossing points on this obstacle
+            ArrayList<Integer> gateIndicesOnContour = new ArrayList<>();
+            for (int g = 0; g < gates.size(); g++) {
+                for (int side = 0; side < 2; side++) {
+                    if (gateObstacleIds.get(g)[side] == obstacleId) {
+                        int idx = findPointInContour(c, gates.get(g)[side]);
+                        if (idx >= 0 && !gateIndicesOnContour.contains(idx)) {
+                            gateIndicesOnContour.add(idx);
+                        }
+                    }
+                }
+            }
+
+            if (gateIndicesOnContour.size() < 2) {
+                // 0 or 1 gate points - add contour as open path (break the loop)
+                // to prevent Dijkstra from circumnavigating the obstacle.
+                // Break at the vertex farthest from region center.
+                int farthestIdx = 0;
+                double maxDist = 0;
+                for (int i = 0; i < c.points.size(); i++) {
+                    Point p = c.points.get(i);
+                    double d = Math.pow(p.x - center.x, 2) + Math.pow(p.y - center.y, 2);
+                    if (d > maxDist) {
+                        maxDist = d;
+                        farthestIdx = i;
+                    }
+                }
+                int breakNext = (farthestIdx + 1) % c.points.size();
+                for (int i = 0; i < c.points.size(); i++) {
+                    int next = (i + 1) % c.points.size();
+                    if (i == farthestIdx && next == breakNext) continue; // skip this edge
+                    addBidirectionalEdge(adjGraph, c.points.get(i), c.points.get(next));
+                }
+                continue;
+            }
+
+            // Sort by position along contour
+            Collections.sort(gateIndicesOnContour);
+
+            // For each consecutive pair of gate points, pick the arc facing the region
+            int n = c.points.size();
+            for (int i = 0; i < gateIndicesOnContour.size(); i++) {
+                int idxA = gateIndicesOnContour.get(i);
+                int idxB = gateIndicesOnContour.get((i + 1) % gateIndicesOnContour.size());
+
+                // Extract both arcs
+                ArrayList<Point> arcFwd = extractArc(c, idxA, idxB);
+                ArrayList<Point> arcRev = extractArc(c, idxB, idxA);
+
+                // Pick the one whose midpoint is closer to region center
+                Point midFwd = arcFwd.get(arcFwd.size() / 2);
+                Point midRev = arcRev.get(arcRev.size() / 2);
+                double dFwd = Math.sqrt(Math.pow(midFwd.x - center.x, 2) + Math.pow(midFwd.y - center.y, 2));
+                double dRev = Math.sqrt(Math.pow(midRev.x - center.x, 2) + Math.pow(midRev.y - center.y, 2));
+
+                ArrayList<Point> chosen = dFwd < dRev ? arcFwd : arcRev;
+                for (int j = 0; j < chosen.size() - 1; j++) {
+                    addBidirectionalEdge(adjGraph, chosen.get(j), chosen.get(j + 1));
+                }
             }
         }
 
-        // 2. Add gate edges (so gate endpoints are vertices in the graph)
+        // 2. Add gate edges
         for (Point[] gate : gates) {
             addBidirectionalEdge(adjGraph, gate[0], gate[1]);
         }
 
-        // 3. Always add map boundary edges: even when no gate directly touches
-        // obstacle 0, the boundary may need to bridge between different obstacle
-        // contours along the map edge.
+        // 3. Always add map boundary edges
         addMapBoundaryEdges(adjGraph);
 
         // Dijkstra: find shortest path from gate[0] endpoint A to endpoint B,
@@ -1041,6 +1122,42 @@ public class ZKTerrainAnalyzer {
         }
 
         return null;
+    }
+
+    private int findPointInContour(Contour c, Point p) {
+        for (int i = 0; i < c.points.size(); i++) {
+            if (c.points.get(i).equals(p)) return i;
+        }
+        // Not an exact match - find nearest
+        double minDist = Double.MAX_VALUE;
+        int best = -1;
+        for (int i = 0; i < c.points.size(); i++) {
+            double d = Math.sqrt(Math.pow(c.points.get(i).x - p.x, 2) +
+                Math.pow(c.points.get(i).y - p.y, 2));
+            if (d < minDist) {
+                minDist = d;
+                best = i;
+            }
+        }
+        return minDist < 3.0 ? best : -1;
+    }
+
+    private ArrayList<Point> extractArc(Contour c, int fromIdx, int toIdx) {
+        ArrayList<Point> arc = new ArrayList<>();
+        int n = c.points.size();
+        for (int i = fromIdx; ; i = (i + 1) % n) {
+            arc.add(c.points.get(i));
+            if (i == toIdx) break;
+        }
+        return arc;
+    }
+
+    private void addContourEdges(HashMap<Point, HashSet<Point>> graph, Contour c) {
+        for (int i = 0; i < c.points.size(); i++) {
+            Point p1 = c.points.get(i);
+            Point p2 = c.points.get((i + 1) % c.points.size());
+            addBidirectionalEdge(graph, p1, p2);
+        }
     }
 
     private void addBidirectionalEdge(HashMap<Point, HashSet<Point>> graph, Point a, Point b) {
