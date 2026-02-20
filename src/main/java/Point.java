@@ -35,4 +35,9 @@ public class Point implements com.goebl.simplify.Point{
         }
         return false;
     }
+
+    @Override
+    public int hashCode() {
+        return 31 * x + y;
+    }
 }
