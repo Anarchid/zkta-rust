@@ -888,21 +888,15 @@ public class ZKTerrainAnalyzer {
         }
 
         if (gates.isEmpty()) {
-            // No chokepoints: region boundary is just the nearest obstacle contour
             return buildSingleContourBoundary(region);
         }
 
-        if (gates.size() == 1) {
-            // Single gate: trace from one crossing point to the other along both obstacles
-            return buildSingleGateBoundary(region, gates.get(0), gateObstacleIds.get(0));
-        }
-
-        // Multiple gates: build boundary subgraph and use Dijkstra
-        return buildMultiGateBoundary(region, gates, gateObstacleIds);
+        // All gated regions (single or multi) use the Dijkstra approach
+        return buildGatedBoundary(region, gates, gateObstacleIds);
     }
 
     private ArrayList<Point> buildSingleContourBoundary(Region region) {
-        // Find the contour nearest to the region center
+        // Find nearest obstacle contour
         double minDist = Double.MAX_VALUE;
         Contour nearest = null;
 
@@ -917,52 +911,92 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        if (nearest != null) {
+        if (nearest == null) return null;
+
+        // Classify each contour vertex as on/off the map edge
+        int n = nearest.points.size();
+        boolean[] onEdge = new boolean[n];
+        int edgeCount = 0;
+        for (int i = 0; i < n; i++) {
+            onEdge[i] = isOnMapEdge(nearest.points.get(i));
+            if (onEdge[i]) edgeCount++;
+        }
+
+        if (edgeCount == 0 || edgeCount == n) {
+            // Entirely on or off the edge - just return contour
             return new ArrayList<>(nearest.points);
         }
-        return null;
-    }
 
-    private ArrayList<Point> buildSingleGateBoundary(Region region, Point[] gate, Integer[] obstacleIds) {
-        ArrayList<Point> boundary = new ArrayList<>();
-
-        // Gate line endpoints
-        Point gateA = gate[0];
-        Point gateB = gate[1];
-
-        // Trace along obstacle A from gateA, collecting points
-        if (obstacleIds[0] > 0 && obstacleIds[0] <= simplifiedContours.size() &&
-            obstacleIds[1] > 0 && obstacleIds[1] <= simplifiedContours.size()) {
-
-            Contour contourA = simplifiedContours.get(obstacleIds[0] - 1);
-            Contour contourB = simplifiedContours.get(obstacleIds[1] - 1);
-
-            // Trace along contour A from gateA toward region center
-            ArrayList<Point> pathA = traceContourBetween(contourA, gateA, null, region.getCenter());
-            // Trace along contour B from gateB toward region center
-            ArrayList<Point> pathB = traceContourBetween(contourB, gateB, null, region.getCenter());
-
-            boundary.add(gateA);
-            boundary.addAll(pathA);
-            // Add connecting map edge points if needed
-            boundary.add(gateB);
-            // Reverse path B so it goes from gateB back
-            Collections.reverse(pathB);
-            boundary.addAll(pathB);
+        // Find transition points: where the contour exits the map edge (last on-edge
+        // vertex before an off-edge vertex) and where it enters (first on-edge vertex
+        // after an off-edge vertex). These bound the interior arc.
+        int exitIdx = -1, enterIdx = -1;
+        for (int i = 0; i < n; i++) {
+            int next = (i + 1) % n;
+            if (onEdge[i] && !onEdge[next]) {
+                exitIdx = i;  // last on-edge before going interior
+            }
+            if (!onEdge[i] && onEdge[next]) {
+                enterIdx = next;  // first on-edge after interior
+            }
         }
 
-        if (boundary.size() >= 3) return boundary;
+        if (exitIdx < 0 || enterIdx < 0) {
+            return new ArrayList<>(nearest.points);
+        }
 
-        // Fallback: just return gate as two-point line
-        return null;
+        // The interior arc goes from exitIdx to enterIdx (through the off-edge vertices).
+        // Include the transition vertices themselves (they're on the map edge and serve
+        // as the connection points for the map-edge closure).
+        ArrayList<Point> obstacleArc = new ArrayList<>();
+        for (int i = exitIdx; ; i = (i + 1) % n) {
+            obstacleArc.add(nearest.points.get(i));
+            if (i == enterIdx) break;
+        }
+
+        // Now close the boundary with map-edge segments from arc end back to arc start
+        Point arcEnd = obstacleArc.get(obstacleArc.size() - 1);
+        Point arcStart = obstacleArc.get(0);
+
+        ArrayList<Point> mapPath = getMapEdgePath(arcEnd, arcStart);
+        if (mapPath != null && mapPath.size() > 1) {
+            // Skip first point (it's arcEnd, already in boundary)
+            for (int i = 1; i < mapPath.size(); i++) {
+                obstacleArc.add(mapPath.get(i));
+            }
+        }
+
+        return obstacleArc;
     }
 
-    private ArrayList<Point> buildMultiGateBoundary(Region region, ArrayList<Point[]> gates,
-                                                     ArrayList<Integer[]> gateObstacleIds) {
-        // Build a boundary graph with gate endpoints and contour vertices
-        // Then find a cycle that encloses the region
+    private ArrayList<Point> getMapEdgePath(Point from, Point to) {
+        // Build a small graph of just map-edge segments and find the path
+        HashMap<Point, HashSet<Point>> mapGraph = new HashMap<>();
 
-        // Collect all relevant obstacle IDs
+        Point[] corners = {
+            new Point(1, 1), new Point(width - 2, 1),
+            new Point(width - 2, height - 2), new Point(1, height - 2)
+        };
+
+        // Add the 4 map edges as connected segments
+        ArrayList<Point> allEdgePoints = new ArrayList<>();
+        allEdgePoints.add(from);
+        allEdgePoints.add(to);
+        for (Point c : corners) {
+            allEdgePoints.add(c);
+        }
+
+        connectEdgePoints(mapGraph, allEdgePoints, corners, 0); // top
+        connectEdgePoints(mapGraph, allEdgePoints, corners, 1); // right
+        connectEdgePoints(mapGraph, allEdgePoints, corners, 2); // bottom
+        connectEdgePoints(mapGraph, allEdgePoints, corners, 3); // left
+
+        return dijkstra(mapGraph, from, to, null);
+    }
+
+    private ArrayList<Point> buildGatedBoundary(Region region, ArrayList<Point[]> gates,
+                                                 ArrayList<Integer[]> gateObstacleIds) {
+        // Collect relevant obstacle contour IDs (skip map boundary ID 0)
         HashSet<Integer> relevantObstacles = new HashSet<>();
         for (Integer[] ids : gateObstacleIds) {
             for (Integer id : ids) {
@@ -972,36 +1006,34 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        // Build adjacency graph of contour points + gate endpoints
+        // Build adjacency graph: contour edges + gate edges + map boundary edges
         HashMap<Point, HashSet<Point>> adjGraph = new HashMap<>();
 
-        // Add contour edges
+        // 1. Add obstacle contour edges
         for (int obstacleId : relevantObstacles) {
             Contour c = simplifiedContours.get(obstacleId - 1);
             for (int i = 0; i < c.points.size(); i++) {
                 Point p1 = c.points.get(i);
                 Point p2 = c.points.get((i + 1) % c.points.size());
-                adjGraph.computeIfAbsent(p1, k -> new HashSet<>()).add(p2);
-                adjGraph.computeIfAbsent(p2, k -> new HashSet<>()).add(p1);
+                addBidirectionalEdge(adjGraph, p1, p2);
             }
         }
 
-        // Also add map boundary edges if region touches map border
-        addMapBoundaryEdges(adjGraph, relevantObstacles);
-
-        // Add gate edges
+        // 2. Add gate edges (so gate endpoints are vertices in the graph)
         for (Point[] gate : gates) {
-            adjGraph.computeIfAbsent(gate[0], k -> new HashSet<>()).add(gate[1]);
-            adjGraph.computeIfAbsent(gate[1], k -> new HashSet<>()).add(gate[0]);
+            addBidirectionalEdge(adjGraph, gate[0], gate[1]);
         }
 
-        // Use first gate as start/end, find shortest path avoiding the direct gate edge
-        if (gates.isEmpty()) return null;
+        // 3. Always add map boundary edges: even when no gate directly touches
+        // obstacle 0, the boundary may need to bridge between different obstacle
+        // contours along the map edge.
+        addMapBoundaryEdges(adjGraph);
 
+        // Dijkstra: find shortest path from gate[0] endpoint A to endpoint B,
+        // going the long way around (prohibiting the direct gate edge)
         Point start = gates.get(0)[0];
         Point goal = gates.get(0)[1];
 
-        // Dijkstra from start to goal, prohibiting the direct gate edge
         ArrayList<Point> path = dijkstra(adjGraph, start, goal, gates.get(0));
 
         if (path != null && path.size() >= 3) {
@@ -1011,34 +1043,31 @@ public class ZKTerrainAnalyzer {
         return null;
     }
 
-    private void addMapBoundaryEdges(HashMap<Point, HashSet<Point>> adjGraph, HashSet<Integer> relevantObstacles) {
-        // Find contour vertices that lie on map boundaries
-        ArrayList<Point> edgePoints = new ArrayList<>();
+    private void addBidirectionalEdge(HashMap<Point, HashSet<Point>> graph, Point a, Point b) {
+        graph.computeIfAbsent(a, k -> new HashSet<>()).add(b);
+        graph.computeIfAbsent(b, k -> new HashSet<>()).add(a);
+    }
 
-        for (int obstacleId : relevantObstacles) {
-            Contour c = simplifiedContours.get(obstacleId - 1);
-            for (Point p : c.points) {
-                if (isOnMapEdge(p)) {
-                    edgePoints.add(p);
-                }
+    private void addMapBoundaryEdges(HashMap<Point, HashSet<Point>> adjGraph) {
+        // Collect ALL points already in the graph that lie on a map edge.
+        // This includes gate endpoints on the map edge and contour vertices on the map edge.
+        ArrayList<Point> edgePoints = new ArrayList<>();
+        for (Point p : adjGraph.keySet()) {
+            if (isOnMapEdge(p)) {
+                edgePoints.add(p);
             }
         }
 
-        // Also add map corners if they're between edge points
         Point[] corners = {
-            new Point(0, 0), new Point(width - 1, 0),
-            new Point(width - 1, height - 1), new Point(0, height - 1)
+            new Point(1, 1), new Point(width - 2, 1),
+            new Point(width - 2, height - 2), new Point(1, height - 2)
         };
 
-        // Group edge points by which edge they're on and connect them
-        // Top edge (y=0)
-        connectEdgePoints(adjGraph, edgePoints, corners, 0);
-        // Right edge (x=width-1)
-        connectEdgePoints(adjGraph, edgePoints, corners, 1);
-        // Bottom edge (y=height-1)
-        connectEdgePoints(adjGraph, edgePoints, corners, 2);
-        // Left edge (x=0)
-        connectEdgePoints(adjGraph, edgePoints, corners, 3);
+        // Connect points along each of the 4 map edges
+        connectEdgePoints(adjGraph, edgePoints, corners, 0); // top
+        connectEdgePoints(adjGraph, edgePoints, corners, 1); // right
+        connectEdgePoints(adjGraph, edgePoints, corners, 2); // bottom
+        connectEdgePoints(adjGraph, edgePoints, corners, 3); // left
     }
 
     private boolean isOnMapEdge(Point p) {
@@ -1062,7 +1091,7 @@ public class ZKTerrainAnalyzer {
 
         if (onThisEdge.isEmpty()) return;
 
-        // Add corners for this edge
+        // Add the two corners for this edge
         switch (edgeIndex) {
             case 0: // top: corners[0] and corners[1]
                 onThisEdge.add(corners[0]);
@@ -1088,10 +1117,7 @@ public class ZKTerrainAnalyzer {
 
         // Connect consecutive points along this edge
         for (int i = 0; i < onThisEdge.size() - 1; i++) {
-            Point a = onThisEdge.get(i);
-            Point b = onThisEdge.get(i + 1);
-            adjGraph.computeIfAbsent(a, k -> new HashSet<>()).add(b);
-            adjGraph.computeIfAbsent(b, k -> new HashSet<>()).add(a);
+            addBidirectionalEdge(adjGraph, onThisEdge.get(i), onThisEdge.get(i + 1));
         }
     }
 
@@ -1146,55 +1172,4 @@ public class ZKTerrainAnalyzer {
         return null; // No path found
     }
 
-    private ArrayList<Point> traceContourBetween(Contour contour, Point from, Point to, Point toward) {
-        ArrayList<Point> result = new ArrayList<>();
-
-        // Find the index of 'from' in the contour
-        int fromIdx = -1;
-        double minDist = Double.MAX_VALUE;
-        for (int i = 0; i < contour.points.size(); i++) {
-            double d = Math.sqrt(Math.pow(contour.points.get(i).x - from.x, 2) +
-                Math.pow(contour.points.get(i).y - from.y, 2));
-            if (d < minDist) {
-                minDist = d;
-                fromIdx = i;
-            }
-        }
-
-        if (fromIdx < 0) return result;
-
-        // Try both directions, pick the one that goes toward the 'toward' point first
-        int n = contour.points.size();
-        ArrayList<Point> clockwise = new ArrayList<>();
-        ArrayList<Point> counterClockwise = new ArrayList<>();
-
-        for (int i = 1; i < n; i++) {
-            clockwise.add(contour.points.get((fromIdx + i) % n));
-        }
-        for (int i = 1; i < n; i++) {
-            counterClockwise.add(contour.points.get((fromIdx - i + n) % n));
-        }
-
-        // Pick direction that has the first point closer to 'toward'
-        if (!clockwise.isEmpty() && !counterClockwise.isEmpty()) {
-            double cwDist = Math.sqrt(Math.pow(clockwise.get(0).x - toward.x, 2) +
-                Math.pow(clockwise.get(0).y - toward.y, 2));
-            double ccwDist = Math.sqrt(Math.pow(counterClockwise.get(0).x - toward.x, 2) +
-                Math.pow(counterClockwise.get(0).y - toward.y, 2));
-
-            result = cwDist < ccwDist ? clockwise : counterClockwise;
-        }
-
-        // If 'to' is specified, truncate at 'to'
-        if (to != null) {
-            for (int i = 0; i < result.size(); i++) {
-                if (result.get(i).equals(to)) {
-                    result = new ArrayList<>(result.subList(0, i + 1));
-                    break;
-                }
-            }
-        }
-
-        return result;
-    }
 }
