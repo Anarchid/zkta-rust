@@ -47,51 +47,7 @@ public class ZKTAWindow {
             bg.setColor(Color.BLACK);
             bg.fillRect(0, 0, img.getWidth(), img.getHeight());
 
-            // Draw region boundaries FIRST (underneath everything)
-            Random colorRandom = new Random(42);
-            int boundariesDrawn = 0;
-            for (Region region : zkta.getRegionList()) {
-                if (region.polygon != null && region.polygon.size() >= 3) {
-                    float hue = colorRandom.nextFloat();
-                    float saturation = 0.7f + colorRandom.nextFloat() * 0.3f;
-                    float brightness = 0.8f + colorRandom.nextFloat() * 0.2f;
-                    Color regionColor = Color.getHSBColor(hue, saturation, brightness);
-
-                    Point centroid = region.getCenter();
-                    int nudgePixels = 3;
-
-                    int[] xPoints = new int[region.polygon.size()];
-                    int[] yPoints = new int[region.polygon.size()];
-
-                    for (int i = 0; i < region.polygon.size(); i++) {
-                        Point current = region.polygon.get(i);
-                        int dx = centroid.x - current.x;
-                        int dy = centroid.y - current.y;
-                        double dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist > 0) {
-                            dx = (int) (nudgePixels * dx / dist);
-                            dy = (int) (nudgePixels * dy / dist);
-                        }
-                        xPoints[i] = current.x + dx;
-                        yPoints[i] = current.y + dy;
-                    }
-
-                    if (region.isClosed) {
-                        Color fillColor = new Color(regionColor.getRed(), regionColor.getGreen(),
-                                                   regionColor.getBlue(), 64);
-                        bg.setColor(fillColor);
-                        bg.fillPolygon(xPoints, yPoints, region.polygon.size());
-                        bg.setColor(regionColor);
-                        bg.setStroke(new BasicStroke(1.0f));
-                        bg.drawPolygon(xPoints, yPoints, region.polygon.size());
-                    }
-
-                    boundariesDrawn++;
-                }
-            }
-            System.out.println("Drew " + boundariesDrawn + " region boundaries");
-
-            // Draw label map (obstacle pixels) - renders on top of region fills
+            // Draw label map (obstacle pixels)
             int[][] lm = zkta.getLabelMap();
             for (int y = 0; y < zkta.getHeight(); y++) {
                 for (int x = 0; x < zkta.getWidth(); x++) {
@@ -127,24 +83,22 @@ public class ZKTAWindow {
 
             // Draw region seed nodes in turquoise with labels
             bg.setColor(new Color(64, 224, 208));
-            int regionNum = 0;
-            for (Node n : r.regionNodes) {
+            for (Region region : zkta.getRegionList()) {
+                Node n = region.seedNode;
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
                 bg.setColor(Color.WHITE);
-                bg.drawString("R" + regionNum, n.position.x + 6, n.position.y - 6);
+                bg.drawString("R" + region.id, n.position.x + 6, n.position.y - 6);
                 bg.setColor(new Color(64, 224, 208));
-                regionNum++;
             }
 
             // Draw chokepoint nodes in red with labels
             bg.setColor(Color.RED);
-            int chokepointNum = 0;
-            for (Node n : r.chokepointNodes) {
+            for (Chokepoint cp : zkta.getChokepointList()) {
+                Node n = cp.node;
                 bg.fillOval(n.position.x - 4, n.position.y - 4, 8, 8);
                 bg.setColor(Color.WHITE);
-                bg.drawString("C" + chokepointNum, n.position.x + 6, n.position.y - 6);
+                bg.drawString("C" + cp.id, n.position.x + 6, n.position.y - 6);
                 bg.setColor(Color.RED);
-                chokepointNum++;
             }
 
             // Draw inscribed circles with low opacity
@@ -178,7 +132,7 @@ public class ZKTAWindow {
             for (int i = 0; i < simple.size(); i++) {
                 Contour contour = simple.get(i);
                 Point pp = contour.getPoint(0);
-                bg.drawString("" + i, pp.x + 10, pp.y + 10);
+                bg.drawString("" + (i + 1), pp.x + 10, pp.y + 10);
                 for (int p = 0; p < contour.length(); p++) {
                     int n = p + 1 < contour.length() ? p + 1 : 0;
                     Point cp = contour.getPoint(p);
@@ -197,6 +151,51 @@ public class ZKTAWindow {
                     bg.drawLine(cp.x, cp.y, np.x, np.y);
                 }
             }
+
+            // Draw region boundaries on top of everything for visibility
+            Random colorRandom = new Random(42);
+            int boundariesDrawn = 0;
+            bg.setStroke(new BasicStroke(2.0f));
+            for (Region region : zkta.getRegionList()) {
+                if (region.polygon != null && region.polygon.size() >= 3) {
+                    float hue = colorRandom.nextFloat();
+                    float saturation = 0.7f + colorRandom.nextFloat() * 0.3f;
+                    float brightness = 0.8f + colorRandom.nextFloat() * 0.2f;
+                    Color regionColor = Color.getHSBColor(hue, saturation, brightness);
+
+                    Point centroid = region.getCenter();
+                    int nudgePixels = 3;
+
+                    int[] xPoints = new int[region.polygon.size()];
+                    int[] yPoints = new int[region.polygon.size()];
+
+                    for (int i = 0; i < region.polygon.size(); i++) {
+                        Point current = region.polygon.get(i);
+                        int dx = centroid.x - current.x;
+                        int dy = centroid.y - current.y;
+                        double dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > 0) {
+                            dx = (int) (nudgePixels * dx / dist);
+                            dy = (int) (nudgePixels * dy / dist);
+                        }
+                        xPoints[i] = current.x + dx;
+                        yPoints[i] = current.y + dy;
+                    }
+
+                    if (region.isClosed) {
+                        Color fillColor = new Color(regionColor.getRed(), regionColor.getGreen(),
+                                                   regionColor.getBlue(), 64);
+                        bg.setColor(fillColor);
+                        bg.fillPolygon(xPoints, yPoints, region.polygon.size());
+                        bg.setColor(regionColor);
+                        bg.drawPolygon(xPoints, yPoints, region.polygon.size());
+                    }
+
+                    boundariesDrawn++;
+                }
+            }
+            bg.setStroke(new BasicStroke(1.0f));
+            System.out.println("Drew " + boundariesDrawn + " region boundaries");
 
             // Draw Voronoi error edge if any
             if (zkta.errorEdge != null) {
