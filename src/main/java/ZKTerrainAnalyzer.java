@@ -66,10 +66,14 @@ public class ZKTerrainAnalyzer {
         contractGraph(regions);
         // Stage 10: Compute chokepoint gates
         computeChokepointGates(regions);
+        // Stage 10b: Insert synthetic chokepoints for nearby unbridged obstacles
+        insertSyntheticChokepoints(regions);
         // Stage 11: Split contours at gate points
         splitContoursAtGatePoints();
         // Stage 12: Construct region boundaries
         constructRegionBoundaries();
+        // Stage 13: Remove duplicate regions (same polygon = same territory)
+        removeDuplicateRegions();
 
         System.out.println("Analysis complete: " + regionList.size() + " regions, " + chokepointList.size() + " chokepoints");
     }
@@ -748,6 +752,102 @@ public class ZKTerrainAnalyzer {
         return r;
     }
 
+    // ---- Stage 10b: Insert synthetic chokepoints (hack) ----
+
+    private void insertSyntheticChokepoints(RegionGraph graph) {
+        double D = 8.0;
+
+        // Collect obstacle pairs already bridged by existing chokepoints
+        HashSet<Long> bridgedPairs = new HashSet<>();
+        for (Chokepoint cp : chokepointList) {
+            if (cp.obstacleIds != null && cp.obstacleIds.length == 2) {
+                long key = pairKey(cp.obstacleIds[0], cp.obstacleIds[1]);
+                bridgedPairs.add(key);
+            }
+        }
+
+        int inserted = 0;
+        for (int i = 0; i < simplifiedContours.size(); i++) {
+            int obstacleId = i + 1;
+            Contour contour = simplifiedContours.get(i);
+            for (int p = 0; p < contour.length(); p++) {
+                Point pt = contour.getPoint(p);
+
+                List<Entry<Integer, Line>> entries = rtree.nearest(
+                    Geometries.point(pt.x, pt.y), radius * 2, 10)
+                    .toList().toBlocking().single();
+
+                for (Entry<Integer, Line> entry : entries) {
+                    int otherObstacleId = entry.value();
+                    if (otherObstacleId == obstacleId || otherObstacleId == 0) continue;
+
+                    double dist = distanceToLine(pt, entry.geometry());
+                    if (dist >= D) continue;
+
+                    long key = pairKey(obstacleId, otherObstacleId);
+                    if (bridgedPairs.contains(key)) continue;
+
+                    // Found an unbridged gap — create synthetic chokepoint
+                    Point cp1 = pt;
+                    Point cp2 = closestPointOnLine(pt, entry.geometry());
+                    Point midpoint = new Point((cp1.x + cp2.x) / 2, (cp1.y + cp2.y) / 2);
+
+                    Node syntheticNode = new Node(midpoint);
+                    syntheticNode.radius = dist / 2;
+
+                    Chokepoint syntheticCp = new Chokepoint(syntheticNode, chokepointList.size());
+                    syntheticCp.setCrossingData(
+                        new Point[]{cp1, cp2},
+                        new Integer[]{obstacleId, otherObstacleId});
+
+                    // Link to nearest two region nodes
+                    Region nearest1 = null, nearest2 = null;
+                    double dist1 = Double.MAX_VALUE, dist2 = Double.MAX_VALUE;
+                    for (Region r : regionList) {
+                        double d = Math.sqrt(
+                            Math.pow(r.seedNode.position.x - midpoint.x, 2) +
+                            Math.pow(r.seedNode.position.y - midpoint.y, 2));
+                        if (d < dist1) {
+                            dist2 = dist1; nearest2 = nearest1;
+                            dist1 = d; nearest1 = r;
+                        } else if (d < dist2) {
+                            dist2 = d; nearest2 = r;
+                        }
+                    }
+                    if (nearest1 != null) {
+                        syntheticCp.addRegion(nearest1);
+                        nearest1.addChokepoint(syntheticNode);
+                    }
+                    if (nearest2 != null) {
+                        syntheticCp.addRegion(nearest2);
+                        nearest2.addChokepoint(syntheticNode);
+                    }
+
+                    graph.nodes.add(syntheticNode);
+                    graph.chokepointNodes.add(syntheticNode);
+                    chokepointList.add(syntheticCp);
+                    graph.chokepoints.add(syntheticCp);
+                    bridgedPairs.add(key);
+                    inserted++;
+
+                    System.out.println("Synthetic chokepoint C" + syntheticCp.id +
+                        " between O" + obstacleId + " and O" + otherObstacleId +
+                        " (gap=" + String.format("%.1f", dist) + "px)");
+                    break; // one synthetic chokepoint per vertex is enough
+                }
+            }
+        }
+        if (inserted > 0) {
+            System.out.println("Inserted " + inserted + " synthetic chokepoints");
+        }
+    }
+
+    private long pairKey(int a, int b) {
+        int lo = Math.min(a, b);
+        int hi = Math.max(a, b);
+        return ((long) lo << 32) | hi;
+    }
+
     private CrossingData findCrossingPoints(Node cpNode) {
         // Find the two closest obstacle segments from different obstacles
         double searchRadius = radius * 2;
@@ -869,6 +969,42 @@ public class ZKTerrainAnalyzer {
             if (r.isClosed) closedCount++;
         }
         System.out.println("Built boundaries: " + closedCount + "/" + regionList.size() + " closed");
+    }
+
+    // ---- Stage 13: Remove duplicate regions (hack) ----
+
+    private void removeDuplicateRegions() {
+        ArrayList<Region> toRemove = new ArrayList<>();
+        for (int i = 0; i < regionList.size(); i++) {
+            Region a = regionList.get(i);
+            if (toRemove.contains(a) || !a.isClosed) continue;
+            for (int j = i + 1; j < regionList.size(); j++) {
+                Region b = regionList.get(j);
+                if (toRemove.contains(b) || !b.isClosed) continue;
+                if (polygonsEqual(a.polygon, b.polygon)) {
+                    // Keep the one with larger inscribed radius
+                    Region loser = a.getRadius() >= b.getRadius() ? b : a;
+                    toRemove.add(loser);
+                    System.out.println("Duplicate territory: R" + a.id + " vs R" + b.id +
+                                       " -> removing R" + loser.id);
+                }
+            }
+        }
+        for (Region loser : toRemove) {
+            regionList.remove(loser);
+            for (Chokepoint cp : chokepointList) {
+                cp.regions.remove(loser);
+            }
+            regions.regionNodes.remove(loser.seedNode);
+        }
+    }
+
+    private boolean polygonsEqual(ArrayList<Point> a, ArrayList<Point> b) {
+        if (a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); i++) {
+            if (a.get(i).x != b.get(i).x || a.get(i).y != b.get(i).y) return false;
+        }
+        return true;
     }
 
     private ArrayList<Point> buildRegionBoundary(Region region) {
