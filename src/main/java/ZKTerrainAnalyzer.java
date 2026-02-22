@@ -813,6 +813,9 @@ public class ZKTerrainAnalyzer {
                     Region nearestPos = null, nearestNeg = null;
                     double distPos = Double.MAX_VALUE, distNeg = Double.MAX_VALUE;
                     for (Region r : regionList) {
+                        // Skip regions whose line-of-sight crosses an existing chokepoint gate
+                        if (crossesChokepointGate(midpoint, r.seedNode.position)) continue;
+
                         double dx = r.seedNode.position.x - midpoint.x;
                         double dy = r.seedNode.position.y - midpoint.y;
                         double perpComp = dx * gatePerpX + dy * gatePerpY;
@@ -856,6 +859,32 @@ public class ZKTerrainAnalyzer {
         int lo = Math.min(a, b);
         int hi = Math.max(a, b);
         return ((long) lo << 32) | hi;
+    }
+
+    private boolean crossesChokepointGate(Point from, Point to) {
+        for (Chokepoint cp : chokepointList) {
+            if (cp.crossingPoints == null || cp.crossingPoints.length != 2) continue;
+            if (segmentsIntersect(from, to, cp.crossingPoints[0], cp.crossingPoints[1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean segmentsIntersect(Point a1, Point a2, Point b1, Point b2) {
+        double d1 = cross(b1, b2, a1);
+        double d2 = cross(b1, b2, a2);
+        double d3 = cross(a1, a2, b1);
+        double d4 = cross(a1, a2, b2);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+            return true;
+        }
+        return false;
+    }
+
+    private double cross(Point o, Point a, Point b) {
+        return (double)(a.x - o.x) * (b.y - o.y) - (double)(a.y - o.y) * (b.x - o.x);
     }
 
     private CrossingData findCrossingPoints(Node cpNode) {
@@ -1199,10 +1228,8 @@ public class ZKTerrainAnalyzer {
                 }
             }
 
-            if (gateIndicesOnContour.size() < 2) {
-                // 0 or 1 gate points - add contour as open path (break the loop)
-                // to prevent Dijkstra from circumnavigating the obstacle.
-                // Break at the vertex farthest from region center.
+            if (gateIndicesOnContour.size() == 0) {
+                // No gate points — add contour as open path, broken at farthest point
                 int farthestIdx = 0;
                 double maxDist = 0;
                 for (int i = 0; i < c.points.size(); i++) {
@@ -1216,8 +1243,27 @@ public class ZKTerrainAnalyzer {
                 int breakNext = (farthestIdx + 1) % c.points.size();
                 for (int i = 0; i < c.points.size(); i++) {
                     int next = (i + 1) % c.points.size();
-                    if (i == farthestIdx && next == breakNext) continue; // skip this edge
+                    if (i == farthestIdx && next == breakNext) continue;
                     addBidirectionalEdge(adjGraph, c.points.get(i), c.points.get(next));
+                }
+                continue;
+            }
+            if (gateIndicesOnContour.size() == 1) {
+                // 1 gate point — pick only the region-facing arc
+                int gateIdx = gateIndicesOnContour.get(0);
+                int n1 = c.points.size();
+                // Find the point diametrically opposite on the contour
+                int oppositeIdx = (gateIdx + n1 / 2) % n1;
+                ArrayList<Point> arcFwd = extractArc(c, gateIdx, oppositeIdx);
+                ArrayList<Point> arcRev = extractArc(c, oppositeIdx, gateIdx);
+                // Pick the arc whose midpoint is closer to region center
+                Point midFwd = arcFwd.get(arcFwd.size() / 2);
+                Point midRev = arcRev.get(arcRev.size() / 2);
+                double dFwd = Math.pow(midFwd.x - center.x, 2) + Math.pow(midFwd.y - center.y, 2);
+                double dRev = Math.pow(midRev.x - center.x, 2) + Math.pow(midRev.y - center.y, 2);
+                ArrayList<Point> chosen = dFwd < dRev ? arcFwd : arcRev;
+                for (int j = 0; j < chosen.size() - 1; j++) {
+                    addBidirectionalEdge(adjGraph, chosen.get(j), chosen.get(j + 1));
                 }
                 continue;
             }
