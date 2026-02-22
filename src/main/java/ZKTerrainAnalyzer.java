@@ -800,27 +800,37 @@ public class ZKTerrainAnalyzer {
                         new Point[]{cp1, cp2},
                         new Integer[]{obstacleId, otherObstacleId});
 
-                    // Link to nearest two region nodes
-                    Region nearest1 = null, nearest2 = null;
-                    double dist1 = Double.MAX_VALUE, dist2 = Double.MAX_VALUE;
+                    // Link to nearest region on each side of the gate line
+                    // Gate perpendicular axis separates the two sides
+                    double gateParX = cp2.x - cp1.x;
+                    double gateParY = cp2.y - cp1.y;
+                    double gatePerpX = -gateParY;
+                    double gatePerpY = gateParX;
+                    double gateLen = Math.sqrt(gateParX * gateParX + gateParY * gateParY);
+                    if (gateLen > 0) { gateParX /= gateLen; gateParY /= gateLen;
+                                       gatePerpX /= gateLen; gatePerpY /= gateLen; }
+
+                    Region nearestPos = null, nearestNeg = null;
+                    double distPos = Double.MAX_VALUE, distNeg = Double.MAX_VALUE;
                     for (Region r : regionList) {
-                        double d = Math.sqrt(
-                            Math.pow(r.seedNode.position.x - midpoint.x, 2) +
-                            Math.pow(r.seedNode.position.y - midpoint.y, 2));
-                        if (d < dist1) {
-                            dist2 = dist1; nearest2 = nearest1;
-                            dist1 = d; nearest1 = r;
-                        } else if (d < dist2) {
-                            dist2 = d; nearest2 = r;
+                        double dx = r.seedNode.position.x - midpoint.x;
+                        double dy = r.seedNode.position.y - midpoint.y;
+                        double perpComp = dx * gatePerpX + dy * gatePerpY;
+                        double parComp = dx * gateParX + dy * gateParY;
+                        double manhattan = Math.abs(perpComp) + Math.abs(parComp);
+                        if (perpComp >= 0) {
+                            if (manhattan < distPos) { distPos = manhattan; nearestPos = r; }
+                        } else {
+                            if (manhattan < distNeg) { distNeg = manhattan; nearestNeg = r; }
                         }
                     }
-                    if (nearest1 != null) {
-                        syntheticCp.addRegion(nearest1);
-                        nearest1.addChokepoint(syntheticNode);
+                    if (nearestPos != null) {
+                        syntheticCp.addRegion(nearestPos);
+                        nearestPos.addChokepoint(syntheticNode);
                     }
-                    if (nearest2 != null) {
-                        syntheticCp.addRegion(nearest2);
-                        nearest2.addChokepoint(syntheticNode);
+                    if (nearestNeg != null) {
+                        syntheticCp.addRegion(nearestNeg);
+                        nearestNeg.addChokepoint(syntheticNode);
                     }
 
                     graph.nodes.add(syntheticNode);
