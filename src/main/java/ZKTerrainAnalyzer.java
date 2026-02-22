@@ -1228,8 +1228,9 @@ public class ZKTerrainAnalyzer {
                 }
             }
 
-            if (gateIndicesOnContour.size() == 0) {
-                // No gate points — add contour as open path, broken at farthest point
+            if (gateIndicesOnContour.size() < 2) {
+                // 0 or 1 gate points - add contour as open path (break the loop)
+                // Break at the vertex farthest from region center.
                 int farthestIdx = 0;
                 double maxDist = 0;
                 for (int i = 0; i < c.points.size(); i++) {
@@ -1245,25 +1246,6 @@ public class ZKTerrainAnalyzer {
                     int next = (i + 1) % c.points.size();
                     if (i == farthestIdx && next == breakNext) continue;
                     addBidirectionalEdge(adjGraph, c.points.get(i), c.points.get(next));
-                }
-                continue;
-            }
-            if (gateIndicesOnContour.size() == 1) {
-                // 1 gate point — pick only the region-facing arc
-                int gateIdx = gateIndicesOnContour.get(0);
-                int n1 = c.points.size();
-                // Find the point diametrically opposite on the contour
-                int oppositeIdx = (gateIdx + n1 / 2) % n1;
-                ArrayList<Point> arcFwd = extractArc(c, gateIdx, oppositeIdx);
-                ArrayList<Point> arcRev = extractArc(c, oppositeIdx, gateIdx);
-                // Pick the arc whose midpoint is closer to region center
-                Point midFwd = arcFwd.get(arcFwd.size() / 2);
-                Point midRev = arcRev.get(arcRev.size() / 2);
-                double dFwd = Math.pow(midFwd.x - center.x, 2) + Math.pow(midFwd.y - center.y, 2);
-                double dRev = Math.pow(midRev.x - center.x, 2) + Math.pow(midRev.y - center.y, 2);
-                ArrayList<Point> chosen = dFwd < dRev ? arcFwd : arcRev;
-                for (int j = 0; j < chosen.size() - 1; j++) {
-                    addBidirectionalEdge(adjGraph, chosen.get(j), chosen.get(j + 1));
                 }
                 continue;
             }
@@ -1302,18 +1284,94 @@ public class ZKTerrainAnalyzer {
         // 3. Always add map boundary edges
         addMapBoundaryEdges(adjGraph);
 
-        // Dijkstra: find shortest path from gate[0] endpoint A to endpoint B,
-        // going the long way around (prohibiting the direct gate edge)
+        // Dijkstra with invasion detection: retry up to 3 times, removing
+        // arcs of obstacles whose contour points end up inside the polygon.
         Point start = gates.get(0)[0];
         Point goal = gates.get(0)[1];
 
-        ArrayList<Point> path = dijkstra(adjGraph, start, goal, gates.get(0));
+        for (int attempt = 0; attempt < 4; attempt++) {
+            ArrayList<Point> path = dijkstra(adjGraph, start, goal, gates.get(0));
+            if (path == null || path.size() < 3) return null;
 
-        if (path != null && path.size() >= 3) {
-            return path;
+            // Check for obstacle invasions
+            int invadedObstacle = -1;
+            for (int obstacleId : relevantObstacles) {
+                Contour c = simplifiedContours.get(obstacleId - 1);
+                int insideCount = 0;
+                for (Point p : c.points) {
+                    if (pointInPolygon(p, path)) insideCount++;
+                }
+                // If most of the obstacle's points are inside, it's an invasion
+                if (insideCount > c.points.size() / 2) {
+                    invadedObstacle = obstacleId;
+                    break;
+                }
+            }
+
+            if (invadedObstacle == -1) return path; // no invasion — done
+
+            // Remove ALL edges of the invaded obstacle from the graph
+            Contour invaded = simplifiedContours.get(invadedObstacle - 1);
+            for (int i = 0; i < invaded.points.size(); i++) {
+                Point p1 = invaded.points.get(i);
+                Point p2 = invaded.points.get((i + 1) % invaded.points.size());
+                HashSet<Point> neighbors1 = adjGraph.get(p1);
+                HashSet<Point> neighbors2 = adjGraph.get(p2);
+                if (neighbors1 != null) neighbors1.remove(p2);
+                if (neighbors2 != null) neighbors2.remove(p1);
+            }
+
+            // Re-add only the region-facing arc using gate points or midpoint heuristic
+            ArrayList<Integer> gateIndicesOnContour = new ArrayList<>();
+            for (int g = 0; g < gates.size(); g++) {
+                for (int side = 0; side < 2; side++) {
+                    if (gateObstacleIds.get(g)[side] == invadedObstacle) {
+                        int idx = findPointInContour(invaded, gates.get(g)[side]);
+                        if (idx >= 0 && !gateIndicesOnContour.contains(idx)) {
+                            gateIndicesOnContour.add(idx);
+                        }
+                    }
+                }
+            }
+
+            if (gateIndicesOnContour.size() >= 1) {
+                // Use gate point(s) as anchor — extract both arcs around the contour,
+                // pick the one whose midpoint is closer to region center
+                int idxA = gateIndicesOnContour.get(0);
+                int idxB = gateIndicesOnContour.size() >= 2
+                    ? gateIndicesOnContour.get(1)
+                    : (idxA + invaded.points.size() / 2) % invaded.points.size();
+
+                ArrayList<Point> arcFwd = extractArc(invaded, idxA, idxB);
+                ArrayList<Point> arcRev = extractArc(invaded, idxB, idxA);
+                Point midFwd = arcFwd.get(arcFwd.size() / 2);
+                Point midRev = arcRev.get(arcRev.size() / 2);
+                double dFwd = Math.pow(midFwd.x - center.x, 2) + Math.pow(midFwd.y - center.y, 2);
+                double dRev = Math.pow(midRev.x - center.x, 2) + Math.pow(midRev.y - center.y, 2);
+                ArrayList<Point> chosen = dFwd < dRev ? arcFwd : arcRev;
+                for (int j = 0; j < chosen.size() - 1; j++) {
+                    addBidirectionalEdge(adjGraph, chosen.get(j), chosen.get(j + 1));
+                }
+            }
+
+            System.out.println("  Invasion of O" + invadedObstacle + " detected in R" +
+                region.id + ", replacing with region-facing arc (attempt " + (attempt + 1) + ")");
         }
-
         return null;
+    }
+
+    private boolean pointInPolygon(Point p, ArrayList<Point> polygon) {
+        boolean inside = false;
+        int n = polygon.size();
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            Point pi = polygon.get(i);
+            Point pj = polygon.get(j);
+            if ((pi.y > p.y) != (pj.y > p.y) &&
+                p.x < (long)(pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x) {
+                inside = !inside;
+            }
+        }
+        return inside;
     }
 
     private int findPointInContour(Contour c, Point p) {
