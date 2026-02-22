@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.function.Predicate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -38,7 +39,57 @@ public class ZKTAWindow {
                 return;
             }
 
-            ZKTerrainAnalyzer zkta = new ZKTerrainAnalyzer(img);
+            // Keep a clean copy for the second analysis and overlay
+            BufferedImage imgCopy = copyImage(img);
+
+            Predicate<Color> botObstacle = c -> c.getRed() > 0;
+            Predicate<Color> vehicleObstacle = c -> c.getRed() > 0 || c.getGreen() > 0;
+
+            // Bot tier analysis
+            System.out.println("=== Bot tier analysis ===");
+            ZKTerrainAnalyzer botZkta = new ZKTerrainAnalyzer(img, botObstacle);
+            renderTierResult(img, botZkta, "result-bot.png");
+            exportToJSON(botZkta, "result-bot.json");
+
+            // Vehicle tier analysis
+            System.out.println("=== Vehicle tier analysis ===");
+            BufferedImage img2 = copyImage(imgCopy);
+            ZKTerrainAnalyzer vehicleZkta = new ZKTerrainAnalyzer(img2, vehicleObstacle);
+            renderTierResult(img2, vehicleZkta, "result-vehicle.png");
+            exportToJSON(vehicleZkta, "result-vehicle.json");
+
+            // Overlay
+            renderOverlay(imgCopy, botZkta, vehicleZkta, "result-overlay.png");
+
+            if (!headless) {
+                JFrame frame = new JFrame();
+                // Show the overlay in the window
+                BufferedImage overlay;
+                try {
+                    overlay = ImageIO.read(new File("result-overlay.png"));
+                } catch (IOException e) {
+                    overlay = imgCopy;
+                }
+                ImageIcon icon = new ImageIcon(overlay);
+                JLabel label = new JLabel(icon);
+                frame.add(label);
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                frame.pack();
+                frame.setVisible(true);
+            } else {
+                System.out.println("Analysis complete. Output saved to result-bot.png/json, result-vehicle.png/json, result-overlay.png");
+            }
+    }
+
+    private static BufferedImage copyImage(BufferedImage src) {
+        BufferedImage copy = new BufferedImage(src.getWidth(), src.getHeight(), src.getType());
+        Graphics g = copy.getGraphics();
+        g.drawImage(src, 0, 0, null);
+        g.dispose();
+        return copy;
+    }
+
+    private static void renderTierResult(BufferedImage img, ZKTerrainAnalyzer zkta, String outputPath) {
             ArrayList<Contour> contours = zkta.getContours();
             ArrayList<Contour> simple = zkta.getSimplifiedContours();
 
@@ -208,31 +259,123 @@ public class ZKTAWindow {
                 System.out.println("Voronoi errored on edge {<" + p1 + ">,<" + p2 + ">}");
             }
 
+            bg.dispose();
+
             // Save result image
-            File outputfile = new File("result.png");
+            File outputfile = new File(outputPath);
             try {
                 ImageIO.write(img, "png", outputfile);
             } catch (IOException e) {
                 e.printStackTrace();
             }
-
-            // Export JSON
-            exportToJSON(zkta);
-
-            if (!headless) {
-                JFrame frame = new JFrame();
-                ImageIcon icon = new ImageIcon(img);
-                JLabel label = new JLabel(icon);
-                frame.add(label);
-                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-                frame.pack();
-                frame.setVisible(true);
-            } else {
-                System.out.println("Analysis complete. Output saved to result.png and result.json");
-            }
     }
 
-    private static void exportToJSON(ZKTerrainAnalyzer zkta) {
+    private static void renderOverlay(BufferedImage baseImg, ZKTerrainAnalyzer botZkta,
+                                       ZKTerrainAnalyzer vehicleZkta, String outputPath) {
+        int w = baseImg.getWidth();
+        int h = baseImg.getHeight();
+        BufferedImage overlay = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = (Graphics2D) overlay.getGraphics();
+
+        // Draw dimmed base image
+        g.drawImage(baseImg, 0, 0, null);
+        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.5f));
+        g.setColor(Color.BLACK);
+        g.fillRect(0, 0, w, h);
+        g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
+
+        // Vehicle tier in red/orange (draw first so bot tier shows on top)
+        Color vehicleRegionColor = new Color(255, 100, 50);
+        Color vehicleRegionFill = new Color(255, 100, 50, 40);
+        Color vehicleChokepointColor = new Color(255, 60, 30);
+        Color vehicleLabelColor = new Color(255, 180, 120);
+        renderOverlayTier(g, vehicleZkta, vehicleRegionColor, vehicleRegionFill,
+                          vehicleChokepointColor, vehicleLabelColor, "V");
+
+        // Bot tier in blue
+        Color botRegionColor = new Color(80, 160, 255);
+        Color botRegionFill = new Color(80, 160, 255, 40);
+        Color botChokepointColor = new Color(40, 100, 255);
+        Color botLabelColor = new Color(160, 210, 255);
+        renderOverlayTier(g, botZkta, botRegionColor, botRegionFill,
+                          botChokepointColor, botLabelColor, "B");
+
+        g.dispose();
+
+        try {
+            ImageIO.write(overlay, "png", new File(outputPath));
+            System.out.println("Overlay saved to " + outputPath);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void renderOverlayTier(Graphics2D g, ZKTerrainAnalyzer zkta,
+                                            Color regionColor, Color regionFill,
+                                            Color chokepointColor, Color labelColor,
+                                            String prefix) {
+        RegionGraph r = zkta.getRegions();
+
+        // Draw region boundary polygons
+        g.setStroke(new BasicStroke(2.0f));
+        for (Region region : zkta.getRegionList()) {
+            if (region.polygon != null && region.polygon.size() >= 3) {
+                Point centroid = region.getCenter();
+                int nudgePixels = 3;
+
+                int[] xPoints = new int[region.polygon.size()];
+                int[] yPoints = new int[region.polygon.size()];
+
+                for (int i = 0; i < region.polygon.size(); i++) {
+                    Point current = region.polygon.get(i);
+                    int dx = centroid.x - current.x;
+                    int dy = centroid.y - current.y;
+                    double dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist > 0) {
+                        dx = (int) (nudgePixels * dx / dist);
+                        dy = (int) (nudgePixels * dy / dist);
+                    }
+                    xPoints[i] = current.x + dx;
+                    yPoints[i] = current.y + dy;
+                }
+
+                if (region.isClosed) {
+                    g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
+                    g.setColor(regionFill);
+                    g.fillPolygon(xPoints, yPoints, region.polygon.size());
+                    g.setColor(regionColor);
+                    g.drawPolygon(xPoints, yPoints, region.polygon.size());
+                }
+            }
+        }
+
+        // Draw chokepoint gate lines
+        g.setStroke(new BasicStroke(2.0f));
+        g.setColor(chokepointColor);
+        for (Node chokepoint : r.chokepointNodes) {
+            Point[] segments = zkta.getChokepointSegments(chokepoint);
+            if (segments != null && segments.length == 2 && !segments[0].equals(segments[1])) {
+                g.drawLine(segments[0].x, segments[0].y, segments[1].x, segments[1].y);
+            }
+        }
+
+        // Draw labels
+        g.setStroke(new BasicStroke(1.0f));
+        g.setColor(labelColor);
+        for (Region region : zkta.getRegionList()) {
+            Node n = region.seedNode;
+            g.fillOval(n.position.x - 3, n.position.y - 3, 6, 6);
+            g.drawString(prefix + "R" + region.id, n.position.x + 5, n.position.y - 5);
+        }
+        g.setColor(chokepointColor);
+        for (Chokepoint cp : zkta.getChokepointList()) {
+            Node n = cp.node;
+            g.fillOval(n.position.x - 3, n.position.y - 3, 6, 6);
+            g.drawString(prefix + "C" + cp.id, n.position.x + 5, n.position.y - 5);
+        }
+    }
+
+    private static void exportToJSON(ZKTerrainAnalyzer zkta, String outputPath) {
         try {
             ObjectMapper mapper = new ObjectMapper();
             Map<String, Object> data = new HashMap<>();
@@ -338,8 +481,8 @@ public class ZKTAWindow {
             }
             data.put("obstacleContours", obstacleContours);
 
-            mapper.writerWithDefaultPrettyPrinter().writeValue(new File("result.json"), data);
-            System.out.println("Exported data to result.json");
+            mapper.writerWithDefaultPrettyPrinter().writeValue(new File(outputPath), data);
+            System.out.println("Exported data to " + outputPath);
         } catch (IOException e) {
             System.err.println("Failed to write JSON file: " + e.getMessage());
         }

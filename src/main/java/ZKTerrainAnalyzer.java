@@ -8,6 +8,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.util.*;
 import java.util.List;
+import java.util.function.Predicate;
 
 import org.rogach.jopenvoronoi.*;
 
@@ -31,8 +32,14 @@ public class ZKTerrainAnalyzer {
     int height;
     static int TOO_CLOSE_TO_OBSTACLE = 15;
     ArrayList<Edge> pruned;
+    Predicate<Color> isObstacle;
 
     ZKTerrainAnalyzer(BufferedImage img) {
+        this(img, c -> c.getRed() > 0);
+    }
+
+    ZKTerrainAnalyzer(BufferedImage img, Predicate<Color> isObstacle) {
+        this.isObstacle = isObstacle;
         width = img.getWidth();
         height = img.getHeight();
         v_width = (double) width;
@@ -141,7 +148,7 @@ public class ZKTerrainAnalyzer {
             for (cy = 0, labelId = 0; cy < height; ++cy) {
                 Color c = new Color(bitMap.getRGB(cx, cy));
 
-                if (c.getRed() > 0) { // is obstacle
+                if (isObstacle.test(c)) { // is obstacle
                     if (labelId != 0) {
                         labelMap[cy][cx] = labelId;
                     } else {
@@ -210,7 +217,7 @@ public class ZKTerrainAnalyzer {
                 continue;
             }
             Color c = new Color(bitMap.getRGB(x, y));
-            if (c.getRed() > 0) {
+            if (isObstacle.test(c)) {
                 return new TracePoint(x, y, tracingdirection);
             } else {
                 labelMap[y][x] = -1;
@@ -316,26 +323,39 @@ public class ZKTerrainAnalyzer {
         Vertex[] cornerVertices = new Vertex[4];
         ArrayList<Vertex> allVertices = new ArrayList<>();
         Vertex[][] contourVertices = new Vertex[obstacles.size()][];
+        HashMap<Long, Vertex> insertedPoints = new HashMap<>();
 
-        // Add contour vertices
+        // Add contour vertices (deduplicating coincident points)
         for (int vi = 0; vi < obstacles.size(); vi++) {
             Point[] pts = obstacles.get(vi).getPointsArray();
             Vertex[] vertices = new Vertex[pts.length - 1];
             for (int j = 0; j < pts.length - 1; j++) {
                 int px = snap(snap(pts[j].x, width, 5), 1, 5);
                 int py = snap(snap(pts[j].y, height, 5), 1, 5);
-                double[] vc = coordsToVoronoi(px, py);
-                vertices[j] = vd.insert_point_site(new org.rogach.jopenvoronoi.Point(vc[0], vc[1]));
+                long key = ((long) px << 32) | (py & 0xFFFFFFFFL);
+                if (insertedPoints.containsKey(key)) {
+                    vertices[j] = insertedPoints.get(key);
+                } else {
+                    double[] vc = coordsToVoronoi(px, py);
+                    vertices[j] = vd.insert_point_site(new org.rogach.jopenvoronoi.Point(vc[0], vc[1]));
+                    insertedPoints.put(key, vertices[j]);
+                }
                 allVertices.add(vertices[j]);
             }
             contourVertices[vi] = vertices;
         }
 
-        // Add corner vertices
+        // Add corner vertices (reusing if already inserted as contour vertex)
         for (int z = 0; z < boundingBox.length; z++) {
             Point p = boundingBox[z];
-            double[] vc = coordsToVoronoi(p.x, p.y);
-            cornerVertices[z] = vd.insert_point_site(new org.rogach.jopenvoronoi.Point(vc[0], vc[1]));
+            long key = ((long) p.x << 32) | (p.y & 0xFFFFFFFFL);
+            if (insertedPoints.containsKey(key)) {
+                cornerVertices[z] = insertedPoints.get(key);
+            } else {
+                double[] vc = coordsToVoronoi(p.x, p.y);
+                cornerVertices[z] = vd.insert_point_site(new org.rogach.jopenvoronoi.Point(vc[0], vc[1]));
+                insertedPoints.put(key, cornerVertices[z]);
+            }
         }
 
         // Build borders
