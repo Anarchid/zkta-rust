@@ -633,12 +633,17 @@ fn build_gated_boundary(
     // 3. Add map boundary edges
     add_map_boundary_edges(&mut adj_graph, width, height);
 
-    // Dijkstra with invasion detection
-    let start = gates[0][0];
-    let goal = gates[0][1];
+    // Pick starting chokepoint: prefer one that bridges two different obstacles,
+    // to avoid short-circuiting through a same-obstacle pocket arc.
+    let start_gate_idx = gate_obstacle_ids
+        .iter()
+        .position(|ids| ids[0] != ids[1])
+        .unwrap_or(0);
+    let start = gates[start_gate_idx][0];
+    let goal = gates[start_gate_idx][1];
 
     for attempt in 0..4 {
-        let path = dijkstra(&adj_graph, start, goal, Some(gates[0]))?;
+        let path = dijkstra(&adj_graph, start, goal, Some(gates[start_gate_idx]))?;
         if path.len() < 3 {
             return None;
         }
