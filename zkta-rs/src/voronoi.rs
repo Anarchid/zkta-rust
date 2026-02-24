@@ -75,6 +75,11 @@ pub fn build_voronoi(
     // Build border point arrays (sorted along each edge)
     let border_info = build_borders(&points, &corner_indices, width, height, snap_tolerance);
 
+    // Track which contour segments lie on borders (covered by obstacle contour edges).
+    // We'll use this to only add border sub-segments for UNCOVERED gaps.
+    let mut contour_border_pairs: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+
     // Build segments for contour edges (skip those that lie on borders)
     for indices in &contour_vertex_indices {
         let n = indices.len();
@@ -88,6 +93,13 @@ pub fn build_voronoi(
 
             // Skip segments that lie on a border
             if is_border_segment(idx_j, idx_k, &border_info) {
+                // Record which border point pairs are covered by this contour segment
+                record_covered_border_pairs(
+                    idx_j,
+                    idx_k,
+                    &border_info,
+                    &mut contour_border_pairs,
+                );
                 continue;
             }
 
@@ -100,6 +112,31 @@ pub fn build_voronoi(
             segments.push([pj[0], pj[1], pk[0], pk[1]]);
         }
     }
+
+    // Add border sub-segments only for gaps NOT covered by obstacle contour segments.
+    let mut border_segment_count = 0;
+    for border in &border_info.borders {
+        for n in 1..border.len() {
+            let idx_a = border[n - 1];
+            let idx_b = border[n];
+            if idx_a == idx_b {
+                continue;
+            }
+            // Skip if this sub-segment is covered by a contour segment
+            let pair = (idx_a.min(idx_b), idx_a.max(idx_b));
+            if contour_border_pairs.contains(&pair) {
+                continue;
+            }
+            let pa = points[idx_a];
+            let pb = points[idx_b];
+            if pa[0] == pb[0] && pa[1] == pb[1] {
+                continue;
+            }
+            segments.push([pa[0], pa[1], pb[0], pb[1]]);
+            border_segment_count += 1;
+        }
+    }
+    eprintln!("Added {} border sub-segments to Voronoi input", border_segment_count);
 
     // Deduplicate segments (both orderings)
     let mut seen_segments: std::collections::HashSet<(i32, i32, i32, i32)> =
@@ -169,11 +206,80 @@ pub fn build_voronoi(
         points = new_points;
     }
 
+    // Check for intersecting segments (boostvoronoi constraint: non-intersecting except at endpoints)
+    let mut intersection_count = 0;
+    for i in 0..segments.len() {
+        for j in (i + 1)..segments.len() {
+            let s1 = &segments[i];
+            let s2 = &segments[j];
+            // Skip if they share an endpoint
+            if (s1[0] == s2[0] && s1[1] == s2[1])
+                || (s1[0] == s2[2] && s1[1] == s2[3])
+                || (s1[2] == s2[0] && s1[3] == s2[1])
+                || (s1[2] == s2[2] && s1[3] == s2[3])
+            {
+                continue;
+            }
+            let a1 = geometry::Point::new(s1[0], s1[1]);
+            let a2 = geometry::Point::new(s1[2], s1[3]);
+            let b1 = geometry::Point::new(s2[0], s2[1]);
+            let b2 = geometry::Point::new(s2[2], s2[3]);
+            if geometry::segments_intersect(a1, a2, b1, b2) {
+                if intersection_count < 5 {
+                    eprintln!(
+                        "  WARNING: intersecting segments: [{},{}]-[{},{}] x [{},{}]-[{},{}]",
+                        s1[0], s1[1], s1[2], s1[3], s2[0], s2[1], s2[2], s2[3]
+                    );
+                }
+                intersection_count += 1;
+            }
+        }
+    }
+    if intersection_count > 0 {
+        eprintln!("Total {} intersecting segment pairs!", intersection_count);
+    }
+
+    // Check for collinear overlapping segments
+    let mut overlap_count = 0;
+    for i in 0..segments.len() {
+        for j in (i + 1)..segments.len() {
+            let s1 = &segments[i];
+            let s2 = &segments[j];
+            if are_collinear_overlapping(s1, s2) {
+                if overlap_count < 5 {
+                    eprintln!(
+                        "  WARNING: collinear overlap: [{},{}]-[{},{}] vs [{},{}]-[{},{}]",
+                        s1[0], s1[1], s1[2], s1[3], s2[0], s2[1], s2[2], s2[3]
+                    );
+                }
+                overlap_count += 1;
+            }
+        }
+    }
+    if overlap_count > 0 {
+        eprintln!("Total {} collinear overlapping segment pairs!", overlap_count);
+    }
+
     eprintln!(
         "Voronoi input: {} points, {} segments",
         points.len(),
         segments.len()
     );
+
+    // Dump segments for diagnostics
+    if std::env::var("ZKTA_DUMP_SEGMENTS").is_ok() {
+        let mut dump = String::new();
+        for s in &segments {
+            dump.push_str(&format!("{},{},{},{}\n", s[0], s[1], s[2], s[3]));
+        }
+        let _ = std::fs::write("segments_dump.csv", dump);
+        let mut dump = String::new();
+        for p in &points {
+            dump.push_str(&format!("{},{}\n", p[0], p[1]));
+        }
+        let _ = std::fs::write("points_dump.csv", dump);
+        eprintln!("Dumped segments/points to CSV");
+    }
 
     // Build Voronoi diagram (catch panics from degenerate geometry)
     let points_clone = points.clone();
@@ -364,17 +470,73 @@ fn build_borders(
     BorderInfo { borders }
 }
 
+/// Check if a contour segment lies entirely along a border.
+/// This detects both exact sub-segment matches and longer segments that span
+/// multiple sub-segments (e.g., a contour segment along the entire west border).
 fn is_border_segment(idx_j: usize, idx_k: usize, info: &BorderInfo) -> bool {
     for border in &info.borders {
-        for n in 1..border.len() {
-            if (border[n - 1] == idx_j && border[n] == idx_k)
-                || (border[n - 1] == idx_k && border[n] == idx_j)
-            {
-                return true;
-            }
+        let has_j = border.contains(&idx_j);
+        let has_k = border.contains(&idx_k);
+        if has_j && has_k {
+            return true;
         }
     }
     false
+}
+
+/// Record which consecutive border sub-segment pairs are covered by a contour segment
+/// that spans from idx_j to idx_k along a border. A contour segment like [1,1]-[1,769]
+/// covers all consecutive pairs between those endpoints in the sorted border list.
+fn record_covered_border_pairs(
+    idx_j: usize,
+    idx_k: usize,
+    info: &BorderInfo,
+    covered: &mut std::collections::HashSet<(usize, usize)>,
+) {
+    for border in &info.borders {
+        let pos_j = border.iter().position(|&i| i == idx_j);
+        let pos_k = border.iter().position(|&i| i == idx_k);
+        if let (Some(pj), Some(pk)) = (pos_j, pos_k) {
+            let lo = pj.min(pk);
+            let hi = pj.max(pk);
+            for n in lo..hi {
+                let pair = (border[n].min(border[n + 1]), border[n].max(border[n + 1]));
+                covered.insert(pair);
+            }
+        }
+    }
+}
+
+/// Check if two segments are collinear and overlapping (share more than an endpoint).
+fn are_collinear_overlapping(s1: &[i32; 4], s2: &[i32; 4]) -> bool {
+    let (x1, y1, x2, y2) = (s1[0] as i64, s1[1] as i64, s1[2] as i64, s1[3] as i64);
+    let (x3, y3, x4, y4) = (s2[0] as i64, s2[1] as i64, s2[2] as i64, s2[3] as i64);
+
+    // Check if all 4 points are collinear
+    let cross1 = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
+    let cross2 = (x2 - x1) * (y4 - y1) - (y2 - y1) * (x4 - x1);
+    if cross1 != 0 || cross2 != 0 {
+        return false;
+    }
+
+    // All collinear - check if they overlap (project onto the line)
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let (t3, t4) = if dx.abs() > dy.abs() {
+        ((x3 - x1) * 1000 / dx.max(1), (x4 - x1) * 1000 / dx.max(1))
+    } else if dy != 0 {
+        ((y3 - y1) * 1000 / dy, (y4 - y1) * 1000 / dy)
+    } else {
+        return false; // Zero-length segment
+    };
+
+    let lo3 = t3.min(t4);
+    let hi3 = t3.max(t4);
+    // s1 goes from t=0 to t=1000
+    // Overlap if intervals [0,1000] and [lo3,hi3] overlap by more than a point
+    let overlap_lo = lo3.max(0);
+    let overlap_hi = hi3.min(1000);
+    overlap_hi - overlap_lo > 1 // More than just a shared endpoint
 }
 
 /// Get the sorted border point coordinates for adding to R-tree.

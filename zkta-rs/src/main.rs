@@ -3,16 +3,19 @@ mod contour;
 mod geometry;
 mod graph;
 mod region;
+mod render;
 mod rtree;
 mod voronoi;
 
 use std::fs;
+use std::path::PathBuf;
 
 use image::Rgba;
 use serde::Serialize;
 
 use analyzer::AnalysisResult;
 use geometry::Point;
+use render::DiagnosticRenderer;
 
 // ---- JSON output structures ----
 
@@ -91,14 +94,8 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
             .crossing_points
             .map(|cps| {
                 vec![
-                    JsonPoint {
-                        x: cps[0].x,
-                        y: cps[0].y,
-                    },
-                    JsonPoint {
-                        x: cps[1].x,
-                        y: cps[1].y,
-                    },
+                    JsonPoint { x: cps[0].x, y: cps[0].y },
+                    JsonPoint { x: cps[1].x, y: cps[1].y },
                 ]
             })
             .unwrap_or_default();
@@ -112,10 +109,7 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
 
         json_chokepoints.push(JsonChokepoint {
             id: cp.id,
-            position: JsonPoint {
-                x: cp.position.x,
-                y: cp.position.y,
-            },
+            position: JsonPoint { x: cp.position.x, y: cp.position.y },
             radius: cp.radius,
             crossing_points: crossing,
             obstacle_ids,
@@ -125,11 +119,7 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
 
     let mut json_contours = Vec::new();
     for (i, c) in result.simplified_contours.iter().enumerate() {
-        let points: Vec<JsonPoint> = c
-            .points
-            .iter()
-            .map(|p| JsonPoint { x: p.x, y: p.y })
-            .collect();
+        let points: Vec<JsonPoint> = c.points.iter().map(|p| JsonPoint { x: p.x, y: p.y }).collect();
         json_contours.push(JsonContour {
             obstacle_id: i + 1,
             point_count: points.len(),
@@ -155,18 +145,17 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
     }
 }
 
-// ---- Rendering ----
+// ---- Final result rendering ----
 
-fn render_tier_result(result: &AnalysisResult, _base_img: &image::RgbaImage, output_path: &str) {
+fn render_final_result(result: &AnalysisResult, output_path: &str) {
     let (w, h) = (result.width, result.height);
     let mut img = image::RgbImage::new(w, h);
 
-    // Black background
     for pixel in img.pixels_mut() {
         *pixel = image::Rgb([0, 0, 0]);
     }
 
-    // Draw label map (obstacle pixels) in dark gray
+    // Draw label map in dark gray
     for y in 0..h {
         for x in 0..w {
             if result.label_map[y as usize][x as usize] != 0 {
@@ -175,84 +164,61 @@ fn render_tier_result(result: &AnalysisResult, _base_img: &image::RgbaImage, out
         }
     }
 
-    // Draw full contours in green
+    // Full contours in green
     for contour in &result.full_contours {
         for i in 0..contour.len() {
             let j = (i + 1) % contour.len();
-            draw_line(
-                &mut img,
-                contour.points[i],
-                contour.points[j],
-                [0, 180, 0],
-            );
+            render::draw_line(&mut img, contour.points[i], contour.points[j], [0, 180, 0]);
         }
     }
 
-    // Draw graph edges in light gray
+    // Graph edges in light gray
     for (&id, neighbors) in &result.graph.adjacency {
         if let Some(node) = result.graph.nodes.get(&id) {
             for &nid in neighbors {
                 if nid > id {
                     if let Some(neighbor) = result.graph.nodes.get(&nid) {
-                        draw_line(
-                            &mut img,
-                            node.position,
-                            neighbor.position,
-                            [180, 180, 180],
-                        );
+                        render::draw_line(&mut img, node.position, neighbor.position, [180, 180, 180]);
                     }
                 }
             }
         }
     }
 
-    // Draw region seed nodes
+    // Region seed nodes
     for r in &result.regions {
-        draw_filled_circle(&mut img, r.center, 4, [64, 224, 208]);
+        render::draw_filled_circle(&mut img, r.center, 4, [64, 224, 208]);
     }
 
-    // Draw chokepoint nodes
+    // Chokepoint nodes + gate lines
     for cp in &result.chokepoints {
-        draw_filled_circle(&mut img, cp.position, 4, [255, 0, 0]);
-    }
-
-    // Draw chokepoint gate lines
-    for cp in &result.chokepoints {
+        render::draw_filled_circle(&mut img, cp.position, 4, [255, 0, 0]);
         if let Some(cps) = cp.crossing_points {
             if cps[0] != cps[1] {
-                draw_line(&mut img, cps[0], cps[1], [255, 0, 0]);
+                render::draw_line(&mut img, cps[0], cps[1], [255, 0, 0]);
             }
         }
     }
 
-    // Draw simplified contours in yellow
+    // Simplified contours in yellow
     for contour in &result.simplified_contours {
         for i in 0..contour.len() {
             let j = (i + 1) % contour.len();
-            draw_line(
-                &mut img,
-                contour.points[i],
-                contour.points[j],
-                [255, 255, 0],
-            );
+            render::draw_line(&mut img, contour.points[i], contour.points[j], [255, 255, 0]);
         }
     }
 
-    // Draw region boundaries with random colors
+    // Region boundaries with random colors
     let mut rng_state = 42u64;
     for r in &result.regions {
         if r.is_closed && r.polygon.len() >= 3 {
             let hue = pseudo_random(&mut rng_state);
             let color = hsv_to_rgb(hue, 0.8, 0.9);
-
-            // Draw filled polygon with dimmed color
             let fill_color = [color[0] / 4, color[1] / 4, color[2] / 4];
-            draw_filled_polygon(&mut img, &r.polygon, fill_color);
-
-            // Draw boundary outline
+            render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
             for i in 0..r.polygon.len() {
                 let j = (i + 1) % r.polygon.len();
-                draw_line(&mut img, r.polygon[i], r.polygon[j], color);
+                render::draw_line(&mut img, r.polygon[i], r.polygon[j], color);
             }
         }
     }
@@ -264,98 +230,8 @@ fn render_tier_result(result: &AnalysisResult, _base_img: &image::RgbaImage, out
     }
 }
 
-// ---- Simple drawing helpers ----
-
-fn draw_line(img: &mut image::RgbImage, p1: Point, p2: Point, color: [u8; 3]) {
-    let (w, h) = img.dimensions();
-    // Bresenham's line algorithm
-    let dx = (p2.x - p1.x).abs();
-    let dy = -(p2.y - p1.y).abs();
-    let sx = if p1.x < p2.x { 1 } else { -1 };
-    let sy = if p1.y < p2.y { 1 } else { -1 };
-    let mut err = dx + dy;
-    let mut x = p1.x;
-    let mut y = p1.y;
-
-    loop {
-        if x >= 0 && x < w as i32 && y >= 0 && y < h as i32 {
-            img.put_pixel(x as u32, y as u32, image::Rgb(color));
-        }
-        if x == p2.x && y == p2.y {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
-}
-
-fn draw_filled_circle(img: &mut image::RgbImage, center: Point, radius: i32, color: [u8; 3]) {
-    let (w, h) = img.dimensions();
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
-            if dx * dx + dy * dy <= radius * radius {
-                let x = center.x + dx;
-                let y = center.y + dy;
-                if x >= 0 && x < w as i32 && y >= 0 && y < h as i32 {
-                    img.put_pixel(x as u32, y as u32, image::Rgb(color));
-                }
-            }
-        }
-    }
-}
-
-fn draw_filled_polygon(img: &mut image::RgbImage, polygon: &[Point], color: [u8; 3]) {
-    if polygon.is_empty() {
-        return;
-    }
-    let min_y = polygon.iter().map(|p| p.y).min().unwrap().max(0);
-    let max_y = polygon
-        .iter()
-        .map(|p| p.y)
-        .max()
-        .unwrap()
-        .min(img.height() as i32 - 1);
-
-    for y in min_y..=max_y {
-        let mut intersections: Vec<i32> = Vec::new();
-        let n = polygon.len();
-        let mut j = n - 1;
-        for i in 0..n {
-            let pi = polygon[i];
-            let pj = polygon[j];
-            if (pi.y > y) != (pj.y > y) {
-                let x = pi.x as f64
-                    + (y as f64 - pi.y as f64) * (pj.x as f64 - pi.x as f64)
-                        / (pj.y as f64 - pi.y as f64);
-                intersections.push(x.round() as i32);
-            }
-            j = i;
-        }
-        intersections.sort();
-        let w = img.width() as i32;
-        for pair in intersections.chunks(2) {
-            if pair.len() == 2 {
-                let x1 = pair[0].max(0);
-                let x2 = pair[1].min(w - 1);
-                for x in x1..=x2 {
-                    img.put_pixel(x as u32, y as u32, image::Rgb(color));
-                }
-            }
-        }
-    }
-}
-
 fn pseudo_random(state: &mut u64) -> f32 {
-    *state = state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     ((*state >> 33) as f32) / (u32::MAX as f32)
 }
 
@@ -371,11 +247,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
         4 => (x, 0.0, c),
         _ => (c, 0.0, x),
     };
-    [
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
-    ]
+    [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
 }
 
 fn main() {
@@ -391,6 +263,9 @@ fn main() {
         eprintln!("Running in headless mode");
     }
 
+    // Create results directory
+    fs::create_dir_all("results").ok();
+
     // Load image
     let img = match image::open(input_path) {
         Ok(img) => img.to_rgba8(),
@@ -403,17 +278,19 @@ fn main() {
     let bot_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 };
     let vehicle_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 || pixel[1] > 0 };
 
-    // Bot tier analysis
+    // Bot tier analysis with diagnostic rendering
     eprintln!("=== Bot tier analysis ===");
-    let bot_result = analyzer::analyze(&img, &bot_obstacle);
-    render_tier_result(&bot_result, &img, "result-bot.png");
-    export_to_json(&bot_result, "result-bot.json");
+    let bot_renderer = DiagnosticRenderer::new(PathBuf::from("results/bot"));
+    let bot_result = analyzer::analyze(&img, &bot_obstacle, &bot_renderer);
+    render_final_result(&bot_result, "results/bot/08_final.png");
+    export_to_json(&bot_result, "results/bot/result.json");
 
-    // Vehicle tier analysis
+    // Vehicle tier analysis with diagnostic rendering
     eprintln!("=== Vehicle tier analysis ===");
-    let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle);
-    render_tier_result(&vehicle_result, &img, "result-vehicle.png");
-    export_to_json(&vehicle_result, "result-vehicle.json");
+    let vehicle_renderer = DiagnosticRenderer::new(PathBuf::from("results/vehicle"));
+    let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle, &vehicle_renderer);
+    render_final_result(&vehicle_result, "results/vehicle/08_final.png");
+    export_to_json(&vehicle_result, "results/vehicle/result.json");
 
-    eprintln!("Analysis complete. Output saved to result-bot.png/json, result-vehicle.png/json");
+    eprintln!("Analysis complete. Results in results/bot/ and results/vehicle/");
 }
