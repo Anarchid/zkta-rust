@@ -701,7 +701,9 @@ fn build_gated_boundary(
             let mid_rev = arc_rev[arc_rev.len() / 2];
             let d_fwd = mid_fwd.dist_sq(&center);
             let d_rev = mid_rev.dist_sq(&center);
-            let chosen = if d_fwd < d_rev { &arc_fwd } else { &arc_rev };
+            // Invasion means the initial closer-to-center arc was wrong;
+            // pick the arc farther from center instead.
+            let chosen = if d_fwd > d_rev { &arc_fwd } else { &arc_rev };
             for j in 0..chosen.len() - 1 {
                 add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
             }
