@@ -582,23 +582,44 @@ fn build_gated_boundary(
         }
 
         if gate_indices.len() < 2 {
-            // 0 or 1 gate points — break contour at farthest vertex
-            let mut farthest_idx = 0;
-            let mut max_dist = 0.0f64;
-            for (i, p) in c.points.iter().enumerate() {
-                let d = p.dist_sq(&center);
-                if d > max_dist {
-                    max_dist = d;
-                    farthest_idx = i;
+            if gate_indices.len() == 1 {
+                // 1 gate point: add only the region-facing arc.
+                // Pick the direction from the gate whose immediate next vertex
+                // is closer to the region center, then follow that half.
+                let gi = gate_indices[0];
+                let n = c.points.len();
+                let next_fwd = (gi + 1) % n;
+                let next_rev = (gi + n - 1) % n;
+                let d_fwd = c.points[next_fwd].dist_sq(&center);
+                let d_rev = c.points[next_rev].dist_sq(&center);
+                let opposite = (gi + n / 2) % n;
+                let chosen = if d_fwd < d_rev {
+                    extract_arc(c, gi, opposite)
+                } else {
+                    extract_arc(c, opposite, gi)
+                };
+                for j in 0..chosen.len() - 1 {
+                    add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
                 }
-            }
-            let break_next = (farthest_idx + 1) % c.points.len();
-            for i in 0..c.points.len() {
-                let next = (i + 1) % c.points.len();
-                if i == farthest_idx && next == break_next {
-                    continue;
+            } else {
+                // 0 gate points: break contour at farthest vertex from center
+                let mut farthest_idx = 0;
+                let mut max_dist = 0.0f64;
+                for (i, p) in c.points.iter().enumerate() {
+                    let d = p.dist_sq(&center);
+                    if d > max_dist {
+                        max_dist = d;
+                        farthest_idx = i;
+                    }
                 }
-                add_bidirectional_edge(&mut adj_graph, c.points[i], c.points[next]);
+                let break_next = (farthest_idx + 1) % c.points.len();
+                for i in 0..c.points.len() {
+                    let next = (i + 1) % c.points.len();
+                    if i == farthest_idx && next == break_next {
+                        continue;
+                    }
+                    add_bidirectional_edge(&mut adj_graph, c.points[i], c.points[next]);
+                }
             }
             continue;
         }
