@@ -42,6 +42,8 @@ struct CrossingData {
 pub fn compute_chokepoint_gates(
     graph: &RegionGraph,
     rtree: &ObstacleRTree,
+    width: i32,
+    height: i32,
 ) -> (Vec<Region>, Vec<Chokepoint>) {
     let mut regions: Vec<Region> = Vec::new();
     let mut chokepoints: Vec<Chokepoint> = Vec::new();
@@ -64,7 +66,7 @@ pub fn compute_chokepoint_gates(
         cp_id += 1;
 
         // Find crossing points
-        if let Some(crossing) = find_crossing_points(node.position, rtree) {
+        if let Some(crossing) = find_crossing_points(node.position, rtree, width, height) {
             cp.crossing_points = Some(crossing.crossing_points);
             cp.obstacle_ids = Some(crossing.obstacle_ids);
         }
@@ -119,27 +121,54 @@ fn find_or_create_region(
     idx
 }
 
-fn find_crossing_points(position: Point, rtree: &ObstacleRTree) -> Option<CrossingData> {
-    let entries = rtree.nearest_n(position, 10);
+fn find_crossing_points(position: Point, rtree: &ObstacleRTree, _w: i32, _h: i32) -> Option<CrossingData> {
+    let entries = rtree.nearest_n(position, 20);
     if entries.len() < 2 {
         return None;
     }
 
+    // First pick: nearest segment (any, including border)
     let first = &entries[0];
-    let second = entries[1..]
-        .iter()
-        .find(|(oid, _, _)| *oid != first.0)?;
-
     let cp1 = closest_point_on_segment(
         position,
         Point::new(first.1.p1[0].round() as i32, first.1.p1[1].round() as i32),
         Point::new(first.1.p2[0].round() as i32, first.1.p2[1].round() as i32),
     );
-    let cp2 = closest_point_on_segment(
-        position,
-        Point::new(second.1.p1[0].round() as i32, second.1.p1[1].round() as i32),
-        Point::new(second.1.p2[0].round() as i32, second.1.p2[1].round() as i32),
-    );
+
+    // Direction from chokepoint center to first crossing point
+    let d1x = cp1.x as f64 - position.x as f64;
+    let d1y = cp1.y as f64 - position.y as f64;
+
+    // Second pick: nearest segment whose closest point is on the opposite side
+    // of the chokepoint (dot product with d1 is negative, i.e., angle > 90°).
+    let mut best: Option<(usize, Point, f64)> = None; // (entry_index, crossing_point, distance)
+    for (i, (_, seg, dist)) in entries.iter().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        let cp_candidate = closest_point_on_segment(
+            position,
+            Point::new(seg.p1[0].round() as i32, seg.p1[1].round() as i32),
+            Point::new(seg.p2[0].round() as i32, seg.p2[1].round() as i32),
+        );
+        // Skip if same crossing point
+        if cp_candidate == cp1 {
+            continue;
+        }
+        let d2x = cp_candidate.x as f64 - position.x as f64;
+        let d2y = cp_candidate.y as f64 - position.y as f64;
+        let dot = d1x * d2x + d1y * d2y;
+        if dot < 0.0 {
+            // Opposite side — accept the nearest one
+            if best.is_none() || *dist < best.as_ref().unwrap().2 {
+                best = Some((i, cp_candidate, *dist));
+            }
+            break; // entries are sorted by distance, so first opposite match is nearest
+        }
+    }
+
+    let (second_idx, cp2, _) = best?;
+    let second = &entries[second_idx];
 
     Some(CrossingData {
         crossing_points: [cp1, cp2],

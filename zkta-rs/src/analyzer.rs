@@ -100,7 +100,7 @@ pub fn analyze(
     renderer.on_contracted(&graph, &simplified_contours, &label_map, width, height);
 
     // Stage 10: Compute chokepoint gates
-    let (mut regions, mut chokepoints) = region::compute_chokepoint_gates(&graph, &rtree);
+    let (mut regions, mut chokepoints) = region::compute_chokepoint_gates(&graph, &rtree, w, h);
 
     // Stage 10b: Insert synthetic chokepoints
     region::insert_synthetic_chokepoints(
