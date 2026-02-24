@@ -227,15 +227,15 @@ impl StageRenderer for DiagnosticRenderer {
             }
         }
 
-        // Draw classified nodes
+        // Draw classified nodes with labels
         for &id in &graph.region_nodes {
             if let Some(node) = graph.nodes.get(&id) {
                 draw_filled_circle(&mut img, node.position, 4, [64, 224, 208]);
-                // Draw inscribed circle hint
                 let r = node.radius as i32;
                 if r > 3 {
                     draw_circle_outline(&mut img, node.position, r, [30, 100, 90]);
                 }
+                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [64, 224, 208]);
             }
         }
         for &id in &graph.chokepoint_nodes {
@@ -245,6 +245,7 @@ impl StageRenderer for DiagnosticRenderer {
                 if r > 3 {
                     draw_circle_outline(&mut img, node.position, r, [100, 30, 30]);
                 }
+                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [255, 50, 50]);
             }
         }
         // Unmarked nodes
@@ -252,6 +253,7 @@ impl StageRenderer for DiagnosticRenderer {
         for (&id, node) in &graph.nodes {
             if !all_marked.contains(&id) {
                 draw_filled_circle(&mut img, node.position, 2, [120, 120, 120]);
+                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [90, 90, 90]);
             }
         }
 

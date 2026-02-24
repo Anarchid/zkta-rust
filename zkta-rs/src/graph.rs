@@ -65,6 +65,9 @@ impl RegionGraph {
     }
 
     pub fn add_edge(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
         self.adjacency.entry(a).or_default().insert(b);
         self.adjacency.entry(b).or_default().insert(a);
     }
@@ -286,13 +289,39 @@ pub fn classify_nodes(graph: &mut RegionGraph) {
         graph.chokepoint_nodes.len(),
         unmarked,
     );
+
+    // Diagnostic: dump all classified nodes with neighbor IDs + radii
+    if std::env::var("ZKTA_DUMP_CLASSIFY").is_ok() {
+        let mut all_nodes: Vec<_> = graph.nodes.iter().collect();
+        all_nodes.sort_by_key(|(&id, _)| id);
+        for (&id, node) in &all_nodes {
+            let deg = graph.degree(id);
+            let class = if graph.region_nodes.contains(&id) {
+                "REGION"
+            } else if graph.chokepoint_nodes.contains(&id) {
+                "CHOKE"
+            } else {
+                "unmarked"
+            };
+            let neighbor_info: Vec<String> = graph.adjacency.get(&id).unwrap_or(&HashSet::new())
+                .iter()
+                .filter_map(|&nid| graph.nodes.get(&nid).map(|n| (nid, n)))
+                .map(|(nid, n)| format!("N{}:{:.1}", nid, n.radius))
+                .collect();
+            eprintln!(
+                "  N{}: ({},{}) deg={} r={:.1} [{}] neighbors=[{}]",
+                id, node.position.x, node.position.y, deg, node.radius, class,
+                neighbor_info.join(", ")
+            );
+        }
+    }
 }
 
 fn is_local_minimum(graph: &RegionGraph, id: usize) -> bool {
     let r = graph.nodes[&id].radius;
     for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::new()) {
         if let Some(n) = graph.nodes.get(&nid) {
-            if n.radius <= r {
+            if n.radius < r {
                 return false;
             }
         }
@@ -304,7 +333,7 @@ fn is_local_maximum(graph: &RegionGraph, id: usize) -> bool {
     let r = graph.nodes[&id].radius;
     for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::new()) {
         if let Some(n) = graph.nodes.get(&nid) {
-            if n.radius >= r {
+            if n.radius > r {
                 return false;
             }
         }
