@@ -433,10 +433,21 @@ fn draw_circle_outline(img: &mut image::RgbImage, center: Point, radius: i32, co
 }
 
 /// Tiny 3x5 bitmap font for labels (digits + uppercase letters).
-fn draw_label(img: &mut image::RgbImage, pos: Point, text: &str, color: [u8; 3]) {
+/// Draw label offset to the upper-right of a marker point.
+pub fn draw_label(img: &mut image::RgbImage, pos: Point, text: &str, color: [u8; 3]) {
+    draw_label_at(img, pos.x + 7, pos.y - 8, text, color);
+}
+
+/// Draw label centered on a point.
+pub fn draw_label_centered(img: &mut image::RgbImage, pos: Point, text: &str, color: [u8; 3]) {
+    let text_width = text.len() as i32 * 5 - 1; // 4px glyph + 1px gap per char
+    draw_label_at(img, pos.x - text_width / 2, pos.y - 2, text, color);
+}
+
+fn draw_label_at(img: &mut image::RgbImage, start_x: i32, start_y: i32, text: &str, color: [u8; 3]) {
     let (w, h) = img.dimensions();
-    let mut cx = pos.x + 7;
-    let cy = pos.y - 8;
+    let mut cx = start_x;
+    let cy = start_y;
     for ch in text.chars() {
         let glyph = char_glyph(ch);
         for (row, &bits) in glyph.iter().enumerate() {

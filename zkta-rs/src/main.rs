@@ -164,6 +164,30 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         }
     }
 
+    // Region boundary fills (bottom layer, drawn first so everything else goes on top)
+    let mut rng_state = 42u64;
+    let mut region_colors: Vec<([u8; 3], [u8; 3])> = Vec::new();
+    for r in &result.regions {
+        let hue = pseudo_random(&mut rng_state);
+        let color = hsv_to_rgb(hue, 0.8, 0.9);
+        let fill_color = [color[0] / 4, color[1] / 4, color[2] / 4];
+        region_colors.push((color, fill_color));
+        if r.is_closed && r.polygon.len() >= 3 {
+            render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
+        }
+    }
+
+    // Region boundary outlines
+    for (i, r) in result.regions.iter().enumerate() {
+        if r.is_closed && r.polygon.len() >= 3 {
+            let color = region_colors[i].0;
+            for j in 0..r.polygon.len() {
+                let k = (j + 1) % r.polygon.len();
+                render::draw_line(&mut img, r.polygon[j], r.polygon[k], color);
+            }
+        }
+    }
+
     // Full contours in green
     for contour in &result.full_contours {
         for i in 0..contour.len() {
@@ -185,42 +209,38 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         }
     }
 
-    // Region seed nodes
-    for r in &result.regions {
-        render::draw_filled_circle(&mut img, r.center, 4, [64, 224, 208]);
+    // Simplified contours in yellow + obstacle labels
+    for (idx, contour) in result.simplified_contours.iter().enumerate() {
+        for i in 0..contour.len() {
+            let j = (i + 1) % contour.len();
+            render::draw_line(&mut img, contour.points[i], contour.points[j], [255, 255, 0]);
+        }
+        if !contour.points.is_empty() {
+            let cx = contour.points.iter().map(|p| p.x as f64).sum::<f64>() / contour.points.len() as f64;
+            let cy = contour.points.iter().map(|p| p.y as f64).sum::<f64>() / contour.points.len() as f64;
+            let centroid = geometry::Point::new(cx.round() as i32, cy.round() as i32);
+            let label = format!("O{}", idx + 1);
+            render::draw_label_centered(&mut img, centroid, &label, [255, 255, 100]);
+        }
     }
 
-    // Chokepoint nodes + gate lines
+    // Chokepoint gate lines + markers + labels
     for cp in &result.chokepoints {
-        render::draw_filled_circle(&mut img, cp.position, 4, [255, 0, 0]);
         if let Some(cps) = cp.crossing_points {
             if cps[0] != cps[1] {
                 render::draw_line(&mut img, cps[0], cps[1], [255, 0, 0]);
             }
         }
+        render::draw_filled_circle(&mut img, cp.position, 4, [255, 0, 0]);
+        let label = format!("C{}", cp.id);
+        render::draw_label(&mut img, cp.position, &label, [255, 100, 100]);
     }
 
-    // Simplified contours in yellow
-    for contour in &result.simplified_contours {
-        for i in 0..contour.len() {
-            let j = (i + 1) % contour.len();
-            render::draw_line(&mut img, contour.points[i], contour.points[j], [255, 255, 0]);
-        }
-    }
-
-    // Region boundaries with random colors
-    let mut rng_state = 42u64;
+    // Region seed nodes + labels (topmost layer)
     for r in &result.regions {
-        if r.is_closed && r.polygon.len() >= 3 {
-            let hue = pseudo_random(&mut rng_state);
-            let color = hsv_to_rgb(hue, 0.8, 0.9);
-            let fill_color = [color[0] / 4, color[1] / 4, color[2] / 4];
-            render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
-            for i in 0..r.polygon.len() {
-                let j = (i + 1) % r.polygon.len();
-                render::draw_line(&mut img, r.polygon[i], r.polygon[j], color);
-            }
-        }
+        render::draw_filled_circle(&mut img, r.center, 4, [64, 224, 208]);
+        let label = format!("R{}", r.id);
+        render::draw_label(&mut img, r.center, &label, [64, 224, 208]);
     }
 
     if let Err(e) = img.save(output_path) {
