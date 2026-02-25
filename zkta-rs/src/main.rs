@@ -406,6 +406,19 @@ fn render_passability(map_data: &SpringMapData, tier: MoveTier, output_path: &st
     }
 }
 
+fn render_obstacle_map(obstacle_map: &[bool], w: u32, h: u32, output_path: &str) {
+    let mut img = image::RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let color = if obstacle_map[(y * w + x) as usize] { 0u8 } else { 255u8 };
+            img.put_pixel(x, y, image::Rgb([color, color, color]));
+        }
+    }
+    if let Err(e) = img.save(output_path) {
+        eprintln!("Failed to save {}: {}", output_path, e);
+    }
+}
+
 // ---- analyze subcommand ----
 
 fn cmd_analyze(args: &[String]) {
@@ -443,6 +456,8 @@ fn cmd_analyze(args: &[String]) {
         eprintln!("=== {} tier analysis (timeout {}s) ===", tier.name(), timeout_secs);
         let (obstacle_map, w, h) = map_data.compute_obstacle_map(*tier);
         let tier_dir = PathBuf::from(format!("{}/{}", output_dir, tier.name()));
+        fs::create_dir_all(&tier_dir).ok();
+        render_obstacle_map(&obstacle_map, w, h, &format!("{}/00_passability.png", tier_dir.display()));
         let tier_name = tier.name().to_string();
         let out = output_dir.to_string();
 
