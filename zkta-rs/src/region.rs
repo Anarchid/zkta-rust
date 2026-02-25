@@ -16,6 +16,7 @@ pub struct Region {
     pub center: Point,
     pub radius: f64,
     pub polygon: Vec<Point>,
+    pub holes: Vec<Vec<Point>>,
     pub is_closed: bool,
     pub chokepoint_node_ids: HashSet<usize>,
 }
@@ -114,6 +115,7 @@ fn find_or_create_region(
         center: node.position,
         radius: node.radius,
         polygon: Vec::new(),
+        holes: Vec::new(),
         is_closed: false,
         chokepoint_node_ids: HashSet::new(),
     });
@@ -390,6 +392,44 @@ pub fn construct_region_boundaries(
         }
     }
     let closed = regions.iter().filter(|r| r.is_closed).count();
+
+    // Detect interior obstacles: obstacle contours entirely inside a region
+    // polygon, with no chokepoint gates on them.  These become holes.
+    let gated_obstacles: HashSet<usize> = chokepoints
+        .iter()
+        .filter_map(|cp| cp.obstacle_ids)
+        .flat_map(|ids| ids.into_iter())
+        .collect();
+
+    let mut total_holes = 0usize;
+    for region in regions.iter_mut() {
+        if !region.is_closed || region.polygon.len() < 3 {
+            continue;
+        }
+        for (ci, contour) in contours.iter().enumerate() {
+            let obs_id = ci + 1; // 1-based obstacle IDs
+            if gated_obstacles.contains(&obs_id) {
+                continue; // obstacle has chokepoint gates, not fully interior
+            }
+            if contour.points.is_empty() {
+                continue;
+            }
+            // Check if the contour centroid is inside the region polygon
+            let cx = contour.points.iter().map(|p| p.x as f64).sum::<f64>()
+                / contour.points.len() as f64;
+            let cy = contour.points.iter().map(|p| p.y as f64).sum::<f64>()
+                / contour.points.len() as f64;
+            let centroid = Point::new(cx.round() as i32, cy.round() as i32);
+            if point_in_polygon(centroid, &region.polygon) {
+                region.holes.push(contour.points.clone());
+                total_holes += 1;
+            }
+        }
+    }
+    if total_holes > 0 {
+        eprintln!("Found {} interior obstacle holes in regions", total_holes);
+    }
+
     eprintln!("Built boundaries: {}/{} closed", closed, regions.len());
 }
 
@@ -634,10 +674,10 @@ fn build_gated_boundary(
             let arc_fwd = extract_arc(c, idx_a, idx_b);
             let arc_rev = extract_arc(c, idx_b, idx_a);
 
-            let mid_fwd = arc_fwd[arc_fwd.len() / 2];
-            let mid_rev = arc_rev[arc_rev.len() / 2];
-            let d_fwd = mid_fwd.dist(&center);
-            let d_rev = mid_rev.dist(&center);
+            let centroid_fwd = arc_centroid(&arc_fwd);
+            let centroid_rev = arc_centroid(&arc_rev);
+            let d_fwd = centroid_fwd.dist(&center);
+            let d_rev = centroid_rev.dist(&center);
 
             let chosen = if d_fwd < d_rev { &arc_fwd } else { &arc_rev };
             for j in 0..chosen.len() - 1 {
@@ -723,10 +763,10 @@ fn build_gated_boundary(
 
             let arc_fwd = extract_arc(invaded, idx_a, idx_b);
             let arc_rev = extract_arc(invaded, idx_b, idx_a);
-            let mid_fwd = arc_fwd[arc_fwd.len() / 2];
-            let mid_rev = arc_rev[arc_rev.len() / 2];
-            let d_fwd = mid_fwd.dist_sq(&center);
-            let d_rev = mid_rev.dist_sq(&center);
+            let centroid_fwd = arc_centroid(&arc_fwd);
+            let centroid_rev = arc_centroid(&arc_rev);
+            let d_fwd = centroid_fwd.dist_sq(&center);
+            let d_rev = centroid_rev.dist_sq(&center);
             // Invasion means the initial closer-to-center arc was wrong;
             // pick the arc farther from center instead.
             let chosen = if d_fwd > d_rev { &arc_fwd } else { &arc_rev };
@@ -766,6 +806,13 @@ fn find_point_in_contour(c: &Contour, p: Point) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn arc_centroid(arc: &[Point]) -> Point {
+    let n = arc.len() as f64;
+    let cx = arc.iter().map(|p| p.x as f64).sum::<f64>() / n;
+    let cy = arc.iter().map(|p| p.y as f64).sum::<f64>() / n;
+    Point::new(cx.round() as i32, cy.round() as i32)
 }
 
 fn extract_arc(c: &Contour, from: usize, to: usize) -> Vec<Point> {

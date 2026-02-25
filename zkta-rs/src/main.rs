@@ -30,6 +30,7 @@ struct JsonRegion {
     #[serde(rename = "isClosed")]
     is_closed: bool,
     polygon: Vec<JsonPoint>,
+    holes: Vec<Vec<JsonPoint>>,
     chokepoints: Vec<usize>,
 }
 
@@ -79,6 +80,9 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
             radius: r.radius,
             is_closed: r.is_closed,
             polygon: r.polygon.iter().map(|p| JsonPoint { x: p.x, y: p.y }).collect(),
+            holes: r.holes.iter().map(|h|
+                h.iter().map(|p| JsonPoint { x: p.x, y: p.y }).collect()
+            ).collect(),
             chokepoints: cp_ids,
         });
     }
@@ -169,6 +173,12 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         region_colors.push((color, fill_color));
         if r.is_closed && r.polygon.len() >= 3 {
             render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
+            // Cut out interior obstacle holes
+            for hole in &r.holes {
+                if hole.len() >= 3 {
+                    render::draw_filled_polygon(&mut img, hole, [50, 50, 50]);
+                }
+            }
         }
     }
 
