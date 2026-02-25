@@ -94,4 +94,33 @@ impl EngineCallbacks {
             call!(self, Log_log, self.ai_id, c_msg.as_ptr());
         }
     }
+
+    /// Send a text command to the engine (e.g. "/QuitForce").
+    pub fn send_text_message(&self, text: &str) {
+        // COMMAND_SEND_TEXT_MESSAGE = 6, COMMAND_TO_ID_ENGINE = -1
+        const COMMAND_SEND_TEXT_MESSAGE: c_int = 6;
+        const COMMAND_TO_ID_ENGINE: c_int = -1;
+
+        #[repr(C)]
+        struct SSendTextMessageCommand {
+            text: *const c_char,
+            zone: c_int,
+        }
+
+        if let Ok(c_text) = CString::new(text) {
+            let cmd = SSendTextMessageCommand {
+                text: c_text.as_ptr(),
+                zone: 0,
+            };
+            call!(
+                self,
+                Engine_handleCommand,
+                self.ai_id,
+                COMMAND_TO_ID_ENGINE,
+                0,
+                COMMAND_SEND_TEXT_MESSAGE,
+                &cmd as *const SSendTextMessageCommand as *mut std::ffi::c_void
+            );
+        }
+    }
 }

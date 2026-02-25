@@ -109,7 +109,13 @@ pub unsafe extern "C" fn init(
     }
     instances[id] = Some(instance);
 
-    cb_log_from_instances(skirmish_ai_id, "[ZKTA Extractor] Done — map data extracted.");
+    cb_log_from_instances(skirmish_ai_id, "[ZKTA Extractor] Done — map data extracted, quitting engine.");
+    {
+        let instances = INSTANCES.lock().unwrap();
+        if let Some(Some(inst)) = instances.get(skirmish_ai_id as usize) {
+            inst.callbacks.send_text_message("/QuitForce");
+        }
+    }
     0
 }
 
