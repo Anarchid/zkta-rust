@@ -94,7 +94,11 @@ fn analyze_inner(
     eprintln!("  [2/13] Simplified to {} contours ({} outer + {} holes, {} points)",
         simplified_contours.len(), outer_count, hole_count, simp_pts);
 
-    // Stage 2b: Paint border pixels in labelMap so graph builder rejects vertices
+    // Stage 2b: Seal dropped holes — overwrite -1 pixels from holes that didn't
+    // survive simplification so graph builder rejects those areas as obstacle.
+    contour::seal_dropped_holes(&holes, 8.0, &mut label_map, width, height);
+
+    // Stage 2c: Paint border pixels in labelMap so graph builder rejects vertices
     // on the map edge. Don't add a separate border contour — border sub-segments are
     // added directly to the Voronoi input (split at obstacle contact points).
     let border_label = simplified_contours.len() as i32 + 1;

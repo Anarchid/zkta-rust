@@ -350,6 +350,109 @@ pub fn simplify_holes(holes: &[LabeledContour], tolerance: f64) -> Vec<Contour> 
     result
 }
 
+/// Seal dropped holes in the label_map.
+///
+/// Holes that don't survive simplification still have their interior marked as
+/// -1 in the label_map (from BFS flood fill during tracing).  The graph builder
+/// checks `label_map > 0` to reject obstacle vertices, so -1 pixels let Voronoi
+/// vertices slip through — creating phantom graph nodes inside obstacles.
+///
+/// This function re-simplifies each original hole to determine if it survived,
+/// and for those that didn't, BFS-fills their -1 interior back to the parent
+/// obstacle label.
+pub fn seal_dropped_holes(
+    holes: &[LabeledContour],
+    tolerance: f64,
+    label_map: &mut [Vec<i32>],
+    width: u32,
+    height: u32,
+) {
+    use std::collections::VecDeque;
+
+    let w = width as i32;
+    let h = height as i32;
+    let mut sealed = 0;
+    let mut total_pixels = 0usize;
+
+    for hole in holes {
+        // Re-simplify to check if this hole would survive
+        let coords: Vec<Coord<f64>> = hole.points.iter().map(|p| Coord {
+            x: p.x as f64,
+            y: p.y as f64,
+        }).collect();
+        let ls = LineString::new(coords);
+        let simplified = ls.simplify(&tolerance);
+        let pts: Vec<Point> = simplified
+            .0
+            .iter()
+            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
+            .collect();
+        let contour = Contour::from_points(pts);
+        if contour.len() > 3 && contour.area() > 100.0 {
+            continue; // Survived simplification — keep as passable
+        }
+
+        // This hole was dropped.  Find a seed pixel inside it.
+        let cx = hole.points.iter().map(|p| p.x as f64).sum::<f64>()
+            / hole.points.len() as f64;
+        let cy = hole.points.iter().map(|p| p.y as f64).sum::<f64>()
+            / hole.points.len() as f64;
+        let seed_x = cx.round() as i32;
+        let seed_y = cy.round() as i32;
+
+        let seed = if seed_x >= 0 && seed_x < w && seed_y >= 0 && seed_y < h
+            && label_map[seed_y as usize][seed_x as usize] == -1
+        {
+            Some((seed_x, seed_y))
+        } else {
+            // Centroid outside hole (concave shape) — scan bounding box
+            let bounds = Contour::from_points(hole.points.clone()).bounds();
+            bounds.and_then(|[min_x, max_x, min_y, max_y]| {
+                for y in min_y.max(0)..=max_y.min(h - 1) {
+                    for x in min_x.max(0)..=max_x.min(w - 1) {
+                        if label_map[y as usize][x as usize] == -1 {
+                            return Some((x, y));
+                        }
+                    }
+                }
+                None
+            })
+        };
+
+        let Some((sx, sy)) = seed else { continue };
+
+        // BFS flood-fill: replace -1 with parent obstacle label.
+        // The -1 area is bounded by positive labels (obstacle boundary),
+        // so the fill stays within the hole interior.
+        let fill_label = hole.label;
+        let mut count = 0usize;
+        label_map[sy as usize][sx as usize] = fill_label;
+        let mut queue = VecDeque::new();
+        queue.push_back((sx, sy));
+        while let Some((x, y)) = queue.pop_front() {
+            count += 1;
+            for &(dx, dy) in &[(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+                let nx = x + dx;
+                let ny = y + dy;
+                if nx < 0 || nx >= w || ny < 0 || ny >= h {
+                    continue;
+                }
+                if label_map[ny as usize][nx as usize] != -1 {
+                    continue;
+                }
+                label_map[ny as usize][nx as usize] = fill_label;
+                queue.push_back((nx, ny));
+            }
+        }
+        sealed += 1;
+        total_pixels += count;
+    }
+
+    if sealed > 0 {
+        eprintln!("Sealed {} dropped holes ({} pixels) in label_map", sealed, total_pixels);
+    }
+}
+
 /// Simplify contours using Douglas-Peucker algorithm.
 /// Returns only contours with >= 4 points and area >= 100.
 pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
