@@ -50,10 +50,10 @@ impl EngineCallbacks {
         }
     }
 
-    /// Height map: (map_width+1) x (map_height+1) floats.
+    /// Center height map: map_width x map_height floats (one per square face).
     pub fn map_get_heightmap(&self) -> Vec<f32> {
-        let w = self.map_width() + 1;
-        let h = self.map_height() + 1;
+        let w = self.map_width();
+        let h = self.map_height();
         let size = (w * h) as usize;
         let mut buf = vec![0.0f32; size];
         call!(self, Map_getHeightMap, self.ai_id, buf.as_mut_ptr(), size as c_int);

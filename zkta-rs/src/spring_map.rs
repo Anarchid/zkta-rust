@@ -1,20 +1,20 @@
 //! Spring map data format (.zktamap) and move-tier obstacle predicates.
 //!
-//! Binary format:
+//! Binary format (version 2):
 //!   magic:        b"ZKTA" (4 bytes)
-//!   version:      u32 = 1
+//!   version:      u32 = 2
 //!   map_width:    u32   (heightmap squares)
 //!   map_height:   u32   (heightmap squares)
 //!   slope_width:  u32   (map_width / 2)
 //!   slope_height: u32   (map_height / 2)
 //!   slope_map:    [f32; slope_width * slope_height]
-//!   height_map:   [f32; (map_width + 1) * (map_height + 1)]
+//!   height_map:   [f32; map_width * map_height]   (center heights, one per square)
 
 use std::io::{self, Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"ZKTA";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Spring map data extracted by the SAI.
 pub struct SpringMapData {
@@ -66,7 +66,7 @@ impl SpringMapData {
         let slope_height = read_u32(r)?;
 
         let slope_count = (slope_width * slope_height) as usize;
-        let height_count = ((map_width + 1) * (map_height + 1)) as usize;
+        let height_count = (map_width * map_height) as usize;
 
         let slope_map = read_f32_vec(r, slope_count)?;
         let height_map = read_f32_vec(r, height_count)?;
@@ -93,10 +93,10 @@ impl SpringMapData {
         self.write_to(&mut file)
     }
 
-    /// Water depth at a heightmap position. Negative height = underwater.
+    /// Water depth at a heightmap square center. Negative height = underwater.
     /// Returns 0.0 for above-water cells.
     fn water_depth_at_hm(&self, hm_x: u32, hm_y: u32) -> f32 {
-        let idx = (hm_y * (self.map_width + 1) + hm_x) as usize;
+        let idx = (hm_y * self.map_width + hm_x) as usize;
         let h = self.height_map[idx];
         if h < 0.0 { -h } else { 0.0 }
     }

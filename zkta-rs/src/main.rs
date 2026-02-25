@@ -346,8 +346,8 @@ fn cmd_render_map(args: &[String]) {
 }
 
 fn render_heightmap(map_data: &SpringMapData, output_path: &str) {
-    let w = map_data.map_width + 1;
-    let h = map_data.map_height + 1;
+    let w = map_data.map_width;
+    let h = map_data.map_height;
 
     let min_h = map_data.height_map.iter().copied().fold(f32::INFINITY, f32::min);
     let max_h = map_data.height_map.iter().copied().fold(f32::NEG_INFINITY, f32::max);
