@@ -25,8 +25,8 @@ pub struct AnalysisResult {
 
 /// Callback for rendering intermediate stages.
 pub trait StageRenderer {
-    fn on_contours_traced(&self, _full: &[Contour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
-    fn on_contours_simplified(&self, _simplified: &[Contour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
+    fn on_contours_traced(&self, _full: &[Contour], _holes: &[LabeledContour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
+    fn on_contours_simplified(&self, _simplified: &[Contour], _outer_count: usize, _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
     fn on_voronoi_built(&self, _edges: &[(Point, Point)], _simplified: &[Contour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
     fn on_graph_built(&self, _graph: &RegionGraph, _voronoi_edges: &[(Point, Point)], _simplified: &[Contour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
     fn on_graph_pruned(&self, _graph: &RegionGraph, _simplified: &[Contour], _label_map: &[Vec<i32>], _w: u32, _h: u32) {}
@@ -82,7 +82,7 @@ fn analyze_inner(
 ) -> AnalysisResult {
     let total_pts: usize = full_contours.iter().map(|c| c.len()).sum();
     eprintln!("  [1/13] Traced {} contours ({} points)", full_contours.len(), total_pts);
-    renderer.on_contours_traced(&full_contours, &label_map, width, height);
+    renderer.on_contours_traced(&full_contours, &holes, &label_map, width, height);
 
     // Stage 2: Simplify contours (outer boundaries + hole inner boundaries)
     let mut simplified_contours = contour::simplify_contours(&full_contours, 8.0);
@@ -108,7 +108,7 @@ fn analyze_inner(
         label_map[y as usize][0] = border_label;
         label_map[y as usize][(w - 1) as usize] = border_label;
     }
-    renderer.on_contours_simplified(&simplified_contours, &label_map, width, height);
+    renderer.on_contours_simplified(&simplified_contours, outer_count, &label_map, width, height);
 
     // Stage 3: Build R-tree (border contour is now part of simplified_contours)
     eprintln!("  [3/13] Building R-tree...");

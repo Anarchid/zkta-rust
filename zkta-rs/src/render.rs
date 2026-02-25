@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::analyzer::StageRenderer;
-use crate::contour::Contour;
+use crate::contour::{Contour, LabeledContour};
 use crate::geometry::Point;
 use crate::graph::RegionGraph;
 
@@ -42,7 +42,7 @@ impl DiagnosticRenderer {
 }
 
 impl StageRenderer for DiagnosticRenderer {
-    fn on_contours_traced(&self, full: &[Contour], label_map: &[Vec<i32>], w: u32, h: u32) {
+    fn on_contours_traced(&self, full: &[Contour], holes: &[LabeledContour], label_map: &[Vec<i32>], w: u32, h: u32) {
         let mut img = self.make_base(label_map, w, h);
 
         // Draw each contour in a distinct color, with obstacle ID labels
@@ -58,14 +58,27 @@ impl StageRenderer for DiagnosticRenderer {
             }
         }
 
+        // Draw hole contours in orange
+        for (i, hole) in holes.iter().enumerate() {
+            let color = [255, 140, 0];
+            for j in 0..hole.points.len() {
+                let k = (j + 1) % hole.points.len();
+                draw_line(&mut img, hole.points[j], hole.points[k], color);
+            }
+            if let Some(&p) = hole.points.first() {
+                draw_label(&mut img, p, &format!("H{}", i + 1), color);
+            }
+        }
+
         self.save("01_contours_traced", &img);
     }
 
-    fn on_contours_simplified(&self, simplified: &[Contour], label_map: &[Vec<i32>], w: u32, h: u32) {
+    fn on_contours_simplified(&self, simplified: &[Contour], outer_count: usize, label_map: &[Vec<i32>], w: u32, h: u32) {
         let mut img = self.make_base(label_map, w, h);
 
         for (i, contour) in simplified.iter().enumerate() {
-            let color = obstacle_color(i + 1);
+            let is_hole = i >= outer_count;
+            let color = if is_hole { [255, 140, 0] } else { obstacle_color(i + 1) };
             for j in 0..contour.len() {
                 let k = (j + 1) % contour.len();
                 draw_line(&mut img, contour.points[j], contour.points[k], color);
@@ -74,9 +87,14 @@ impl StageRenderer for DiagnosticRenderer {
             for p in &contour.points {
                 draw_filled_circle(&mut img, *p, 2, [255, 255, 255]);
             }
-            // Label
+            // Label: H for holes, O for outer
             if let Some(&p) = contour.points.first() {
-                draw_label(&mut img, p, &format!("O{} ({}v)", i + 1, contour.len()), color);
+                let label = if is_hole {
+                    format!("H{} ({}v)", i - outer_count + 1, contour.len())
+                } else {
+                    format!("O{} ({}v)", i + 1, contour.len())
+                };
+                draw_label(&mut img, p, &label, color);
             }
         }
 
