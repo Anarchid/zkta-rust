@@ -157,7 +157,7 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
     // Draw label map in dark gray
     for y in 0..h {
         for x in 0..w {
-            if result.label_map[y as usize][x as usize] != 0 {
+            if result.label_map[y as usize][x as usize] > 0 {
                 img.put_pixel(x, y, image::Rgb([50, 50, 50]));
             }
         }
