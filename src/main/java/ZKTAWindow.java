@@ -58,6 +58,9 @@ public class ZKTAWindow {
             renderTierResult(img2, vehicleZkta, "result-vehicle.png");
             exportToJSON(vehicleZkta, "result-vehicle.json");
 
+            // Diagnostic: just Voronoi + obstacles
+            renderVoronoiDiagnostic(copyImage(imgCopy), vehicleZkta, "result-voronoi.png");
+
             // Overlay
             renderOverlay(imgCopy, botZkta, vehicleZkta, "result-overlay.png");
 
@@ -119,6 +122,20 @@ public class ZKTAWindow {
                     bg.drawLine(cp.x, cp.y, np.x, np.y);
                 }
             }
+
+            // Draw unpruned Voronoi graph edges (before leaf pruning) in dim tint
+            bg.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f));
+            bg.setColor(new Color(180, 220, 255));
+            HalfEdgeDiagram hed = zkta.getVoronoid().get_graph_reference();
+            java.util.ArrayList<Edge> prunedEdges = zkta.getPruned();
+            for (Edge e : hed.edges) {
+                if (e.valid && !prunedEdges.contains(e)) {
+                    int[] c1 = zkta.coordsFromVoronoi(e.source);
+                    int[] c2 = zkta.coordsFromVoronoi(e.target);
+                    bg.drawLine(c1[0], c1[1], c2[0], c2[1]);
+                }
+            }
+            bg.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
 
             // Draw graph edges in light gray
             bg.setColor(Color.LIGHT_GRAY);
@@ -268,6 +285,60 @@ public class ZKTAWindow {
             } catch (IOException e) {
                 e.printStackTrace();
             }
+    }
+
+    private static void renderVoronoiDiagnostic(BufferedImage img, ZKTerrainAnalyzer zkta, String outputPath) {
+        Graphics2D bg = (Graphics2D) img.getGraphics();
+
+        // Black background
+        bg.setColor(Color.BLACK);
+        bg.fillRect(0, 0, img.getWidth(), img.getHeight());
+
+        // Draw obstacle pixels from labelMap in dark gray
+        int[][] lm = zkta.getLabelMap();
+        bg.setColor(new Color(40, 40, 40));
+        for (int y = 0; y < zkta.getHeight(); y++) {
+            for (int x = 0; x < zkta.getWidth(); x++) {
+                if (lm[y][x] > 0) {
+                    bg.drawLine(x, y, x, y);
+                }
+            }
+        }
+
+        // Draw simplified contours in yellow
+        bg.setColor(Color.YELLOW);
+        for (Contour contour : zkta.getSimplifiedContours()) {
+            for (int p = 0; p < contour.length(); p++) {
+                int n = p + 1 < contour.length() ? p + 1 : 0;
+                Point cp = contour.getPoint(p);
+                Point np = contour.getPoint(n);
+                bg.drawLine(cp.x, cp.y, np.x, np.y);
+            }
+        }
+
+        // Draw ALL valid Voronoi edges (no pruning) in blue
+        bg.setColor(new Color(80, 140, 255));
+        HalfEdgeDiagram hed = zkta.getVoronoid().get_graph_reference();
+        for (Edge e : hed.edges) {
+            if (e.valid) {
+                int[] c1 = zkta.coordsFromVoronoi(e.source);
+                int[] c2 = zkta.coordsFromVoronoi(e.target);
+                // Skip edges that go way out of bounds
+                if (c1[0] < -100 || c1[0] > zkta.getWidth() + 100 ||
+                    c1[1] < -100 || c1[1] > zkta.getHeight() + 100 ||
+                    c2[0] < -100 || c2[0] > zkta.getWidth() + 100 ||
+                    c2[1] < -100 || c2[1] > zkta.getHeight() + 100) continue;
+                bg.drawLine(c1[0], c1[1], c2[0], c2[1]);
+            }
+        }
+
+        bg.dispose();
+        try {
+            ImageIO.write(img, "png", new File(outputPath));
+            System.out.println("Voronoi diagnostic saved to " + outputPath);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private static void renderOverlay(BufferedImage baseImg, ZKTerrainAnalyzer botZkta,

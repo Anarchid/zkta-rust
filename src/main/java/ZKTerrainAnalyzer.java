@@ -60,6 +60,8 @@ public class ZKTerrainAnalyzer {
         rtree = buildRTree();
         // Stage 4: Generate Voronoi
         voronoid = generateVoronoi((ArrayList<Contour>) simplifiedContours.clone());
+        // Stage 4b: Filter to medial axis only
+        voronoid.filter(new MedialAxisFilter());
         // Stage 5: Build node graph
         pruned = getPrunedEdges(voronoid);
         regions = convertGraph(voronoid.get_graph_reference());
@@ -96,6 +98,7 @@ public class ZKTerrainAnalyzer {
     public VoronoiDiagram getVoronoid() { return voronoid; }
     public ArrayList<Contour> getContours() { return fullContours; }
     public ArrayList<Contour> getSimplifiedContours() { return simplifiedContours; }
+    public ArrayList<Edge> getPruned() { return pruned; }
 
     public Point[] getChokepointSegments(Node chokepointNode) {
         for (Chokepoint cp : chokepointList) {
@@ -134,6 +137,20 @@ public class ZKTerrainAnalyzer {
 
     private int clamp(int value, int min, int max) {
         return Math.min(Math.max(value, min), max);
+    }
+
+    // ---- Stage 0: Paint map border as obstacle pixels ----
+
+    private void paintBorder() {
+        int rgb = Color.WHITE.getRGB();
+        for (int x = 0; x < width; x++) {
+            bitMap.setRGB(x, 0, rgb);
+            bitMap.setRGB(x, height - 1, rgb);
+        }
+        for (int y = 0; y < height; y++) {
+            bitMap.setRGB(0, y, rgb);
+            bitMap.setRGB(width - 1, y, rgb);
+        }
     }
 
     // ---- Stage 1: Trace contours ----
@@ -395,16 +412,9 @@ public class ZKTerrainAnalyzer {
             }
         }
 
-        // Insert border line sites and add to R-tree as obstacle 0 (map boundary)
+        // Add border segments to R-tree only (skip Voronoi line site injection)
         for (int l = 0; l < borders.length; l++) {
             for (int n = 1; n < borders[l].length; n++) {
-                try {
-                    vd.insert_line_site(borders[l][n - 1], borders[l][n]);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    this.errorEdge = new Vertex[]{borders[l][n - 1], borders[l][n]};
-                    return vd;
-                }
                 int[] c1 = coordsFromVoronoi(borders[l][n - 1]);
                 int[] c2 = coordsFromVoronoi(borders[l][n]);
                 rtree = rtree.add(0, Geometries.line(c1[0], c1[1], c2[0], c2[1]));

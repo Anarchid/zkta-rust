@@ -1,0 +1,15 @@
+[package]
+name = "zkta-extractor"
+version = "0.1.0"
+edition = "2021"
+description = "Spring/Recoil SkirmishAI that extracts map slope+height data to .zktamap files"
+
+[lib]
+crate-type = ["cdylib"]
+name = "SkirmishAI"
+
+[dependencies]
+zkta = { package = "zkta-rs", path = "../zkta-rs" }
+
+[build-dependencies]
+bindgen = "0.71"

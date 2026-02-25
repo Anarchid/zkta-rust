@@ -38,7 +38,24 @@ pub trait StageRenderer {
 pub struct NoopRenderer;
 impl StageRenderer for NoopRenderer {}
 
-/// Run the full terrain analysis pipeline.
+/// Run terrain analysis from a boolean obstacle bitmap.
+///
+/// Each cell in `obstacle_map` is `true` for obstacle, `false` for passable.
+/// Layout: row-major, `obstacle_map[y * width + x]`.
+pub fn analyze_bitmap(
+    obstacle_map: &[bool],
+    width: u32,
+    height: u32,
+    renderer: &dyn StageRenderer,
+) -> AnalysisResult {
+    let pixel_test = |x: u32, y: u32| -> bool {
+        obstacle_map[(y * width + x) as usize]
+    };
+    let (full_contours, holes, label_map) = contour::trace_contours(width, height, &pixel_test);
+    analyze_inner(full_contours, holes, label_map, width, height, renderer)
+}
+
+/// Run the full terrain analysis pipeline from an RGBA image.
 pub fn analyze(
     img: &RgbaImage,
     is_obstacle: &dyn Fn(image::Rgba<u8>) -> bool,
@@ -47,9 +64,20 @@ pub fn analyze(
     let width = img.width();
     let height = img.height();
 
-    // Stage 1: Trace contours (real obstacles only)
     let pixel_test = |x: u32, y: u32| -> bool { is_obstacle(*img.get_pixel(x, y)) };
-    let (full_contours, holes, mut label_map) = contour::trace_contours(width, height, &pixel_test);
+    let (full_contours, holes, label_map) = contour::trace_contours(width, height, &pixel_test);
+    analyze_inner(full_contours, holes, label_map, width, height, renderer)
+}
+
+/// Shared analysis pipeline — from traced contours through to final regions.
+fn analyze_inner(
+    full_contours: Vec<Contour>,
+    holes: Vec<LabeledContour>,
+    mut label_map: Vec<Vec<i32>>,
+    width: u32,
+    height: u32,
+    renderer: &dyn StageRenderer,
+) -> AnalysisResult {
     renderer.on_contours_traced(&full_contours, &label_map, width, height);
 
     // Stage 2: Simplify contours

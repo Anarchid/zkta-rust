@@ -1,21 +1,13 @@
-mod analyzer;
-mod contour;
-mod geometry;
-mod graph;
-mod region;
-mod render;
-mod rtree;
-mod voronoi;
-
 use std::fs;
 use std::path::PathBuf;
 
 use image::Rgba;
 use serde::Serialize;
 
-use analyzer::AnalysisResult;
-use geometry::Point;
-use render::DiagnosticRenderer;
+use zkta::analyzer::{self, AnalysisResult};
+use zkta::geometry;
+use zkta::render::{self, DiagnosticRenderer};
+use zkta::spring_map::{MoveTier, SpringMapData};
 
 // ---- JSON output structures ----
 
@@ -270,47 +262,119 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
 }
 
+/// Run analysis for a single tier and save results.
+fn run_tier(result: &AnalysisResult, tier_name: &str, results_dir: &str) {
+    let dir = format!("{}/{}", results_dir, tier_name);
+    render_final_result(result, &format!("{}/08_final.png", dir));
+    export_to_json(result, &format!("{}/result.json", dir));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let input_path = args
-        .iter()
-        .find(|a| !a.starts_with('-') && *a != &args[0])
-        .map(|s| s.as_str())
-        .unwrap_or("trojan.png");
 
     let headless = args.iter().any(|a| a == "--headless" || a == "-d");
     if headless {
         eprintln!("Running in headless mode");
     }
 
-    // Create results directory
-    fs::create_dir_all("results").ok();
+    // Check for --spring mode
+    let spring_idx = args.iter().position(|a| a == "--spring");
+    let tiers_idx = args.iter().position(|a| a == "--tiers");
 
-    // Load image
-    let img = match image::open(input_path) {
-        Ok(img) => img.to_rgba8(),
-        Err(e) => {
-            eprintln!("Failed to load {}: {}", input_path, e);
+    if let Some(idx) = spring_idx {
+        // Spring map mode
+        let map_path = args.get(idx + 1).unwrap_or_else(|| {
+            eprintln!("Usage: zkta-rs --spring <path.zktamap> [--tiers bot,vehicle,...]");
+            std::process::exit(1);
+        });
+
+        // Parse tiers
+        let tiers: Vec<MoveTier> = if let Some(ti) = tiers_idx {
+            args.get(ti + 1)
+                .map(|s| {
+                    s.split(',')
+                        .filter_map(|name| {
+                            MoveTier::from_name(name.trim()).or_else(|| {
+                                eprintln!("Unknown tier: {}", name.trim());
+                                None
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|| MoveTier::ALL.to_vec())
+        } else {
+            MoveTier::ALL.to_vec()
+        };
+
+        if tiers.is_empty() {
+            eprintln!("No valid tiers specified");
             return;
         }
-    };
 
-    let bot_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 };
-    let vehicle_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 || pixel[1] > 0 };
+        // Load .zktamap
+        let map_data = match SpringMapData::load(std::path::Path::new(map_path)) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Failed to load {}: {}", map_path, e);
+                return;
+            }
+        };
 
-    // Bot tier analysis with diagnostic rendering
-    eprintln!("=== Bot tier analysis ===");
-    let bot_renderer = DiagnosticRenderer::new(PathBuf::from("results/bot"));
-    let bot_result = analyzer::analyze(&img, &bot_obstacle, &bot_renderer);
-    render_final_result(&bot_result, "results/bot/08_final.png");
-    export_to_json(&bot_result, "results/bot/result.json");
+        eprintln!(
+            "Spring map: {}x{} heightmap squares, {}x{} slope cells",
+            map_data.map_width, map_data.map_height,
+            map_data.slope_width, map_data.slope_height,
+        );
 
-    // Vehicle tier analysis with diagnostic rendering
-    eprintln!("=== Vehicle tier analysis ===");
-    let vehicle_renderer = DiagnosticRenderer::new(PathBuf::from("results/vehicle"));
-    let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle, &vehicle_renderer);
-    render_final_result(&vehicle_result, "results/vehicle/08_final.png");
-    export_to_json(&vehicle_result, "results/vehicle/result.json");
+        // Create results directory
+        fs::create_dir_all("results").ok();
 
-    eprintln!("Analysis complete. Results in results/bot/ and results/vehicle/");
+        // Analyze each tier
+        for tier in &tiers {
+            eprintln!("=== {} tier analysis ===", tier.name());
+            let (obstacle_map, w, h) = map_data.compute_obstacle_map(*tier);
+            let renderer = DiagnosticRenderer::new(PathBuf::from(format!("results/{}", tier.name())));
+            let result = analyzer::analyze_bitmap(&obstacle_map, w, h, &renderer);
+            run_tier(&result, tier.name(), "results");
+        }
+
+        let tier_names: Vec<&str> = tiers.iter().map(|t| t.name()).collect();
+        eprintln!("Spring analysis complete. Tiers: {}", tier_names.join(", "));
+    } else {
+        // Legacy image mode
+        let input_path = args
+            .iter()
+            .find(|a| !a.starts_with('-') && *a != &args[0])
+            .map(|s| s.as_str())
+            .unwrap_or("trojan.png");
+
+        // Create results directory
+        fs::create_dir_all("results").ok();
+
+        // Load image
+        let img = match image::open(input_path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("Failed to load {}: {}", input_path, e);
+                return;
+            }
+        };
+
+        let bot_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 };
+        let vehicle_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 || pixel[1] > 0 };
+
+        // Bot tier analysis with diagnostic rendering
+        eprintln!("=== Bot tier analysis ===");
+        let bot_renderer = DiagnosticRenderer::new(PathBuf::from("results/bot"));
+        let bot_result = analyzer::analyze(&img, &bot_obstacle, &bot_renderer);
+        run_tier(&bot_result, "bot", "results");
+
+        // Vehicle tier analysis with diagnostic rendering
+        eprintln!("=== Vehicle tier analysis ===");
+        let vehicle_renderer = DiagnosticRenderer::new(PathBuf::from("results/vehicle"));
+        let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle, &vehicle_renderer);
+        run_tier(&vehicle_result, "vehicle", "results");
+
+        eprintln!("Analysis complete. Results in results/bot/ and results/vehicle/");
+    }
 }

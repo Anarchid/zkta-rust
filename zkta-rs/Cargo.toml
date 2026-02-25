@@ -3,6 +3,14 @@ name = "zkta-rs"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "zkta"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkta-rs"
+path = "src/main.rs"
+
 [dependencies]
 boostvoronoi = "0.12"
 rstar = "0.12"
