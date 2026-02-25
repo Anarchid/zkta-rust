@@ -237,6 +237,20 @@ pub fn classify_nodes(graph: &mut RegionGraph) {
         }
     }
 
+    // Fallback for leafless graphs (e.g. cyclic medial axes in ring-shaped
+    // passable areas like ship tier water).  Seed from unvisited nodes with
+    // the largest radius until all components are covered.
+    if to_process.is_empty() {
+        if let Some(&seed) = ids.iter()
+            .filter(|id| !graph.nodes[id].visited)
+            .max_by(|a, b| graph.nodes[a].radius.partial_cmp(&graph.nodes[b].radius).unwrap())
+        {
+            to_process.push_back(seed);
+            graph.set_region(seed);
+            graph.nodes.get_mut(&seed).unwrap().visited = true;
+        }
+    }
+
     while let Some(current) = to_process.pop_front() {
         let neighbors = graph.neighbors(current);
         for nid in neighbors {
