@@ -142,8 +142,9 @@ pub fn trace_contours(
     }
 
     eprintln!(
-        "Traced {} contours",
-        contours.len()
+        "Traced {} contours, {} holes",
+        contours.len(),
+        holes.len()
     );
     (contours, holes, label_map)
 }
@@ -241,7 +242,7 @@ fn tracer(
     }
 }
 
-fn fill_hole(hole: &Contour, label_id: i32, label_map: &mut Vec<Vec<i32>>) {
+fn fill_hole(hole: &Contour, _label_id: i32, label_map: &mut Vec<Vec<i32>>) {
     let bounds = match hole.bounds() {
         Some(b) => b,
         None => return,
@@ -267,12 +268,26 @@ fn fill_hole(hole: &Contour, label_id: i32, label_map: &mut Vec<Vec<i32>>) {
                 }
                 if inside {
                     for x in min..max {
-                        label_map[y as usize][x as usize] = label_id;
+                        // Use -1 (background/visited) instead of label_id so the
+                        // graph builder doesn't reject passable pixels inside holes.
+                        label_map[y as usize][x as usize] = -1;
                     }
                 }
             }
         }
     }
+}
+
+/// Simplify hole contours (inner boundaries of obstacles) using Douglas-Peucker.
+/// Same filtering as simplify_contours: >= 4 points and area >= 100.
+pub fn simplify_holes(holes: &[LabeledContour], tolerance: f64) -> Vec<Contour> {
+    let as_contours: Vec<Contour> = holes
+        .iter()
+        .map(|h| Contour::from_points(h.points.clone()))
+        .collect();
+    let result = simplify_contours(&as_contours, tolerance);
+    eprintln!("Simplified {} holes to {} hole contours", holes.len(), result.len());
+    result
 }
 
 /// Simplify contours using Douglas-Peucker algorithm.

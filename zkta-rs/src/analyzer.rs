@@ -84,10 +84,15 @@ fn analyze_inner(
     eprintln!("  [1/13] Traced {} contours ({} points)", full_contours.len(), total_pts);
     renderer.on_contours_traced(&full_contours, &label_map, width, height);
 
-    // Stage 2: Simplify contours
+    // Stage 2: Simplify contours (outer boundaries + hole inner boundaries)
     let mut simplified_contours = contour::simplify_contours(&full_contours, 8.0);
+    let outer_count = simplified_contours.len();
+    let simplified_holes = contour::simplify_holes(&holes, 8.0);
+    let hole_count = simplified_holes.len();
+    simplified_contours.extend(simplified_holes);
     let simp_pts: usize = simplified_contours.iter().map(|c| c.len()).sum();
-    eprintln!("  [2/13] Simplified to {} points", simp_pts);
+    eprintln!("  [2/13] Simplified to {} contours ({} outer + {} holes, {} points)",
+        simplified_contours.len(), outer_count, hole_count, simp_pts);
 
     // Stage 2b: Paint border pixels in labelMap so graph builder rejects vertices
     // on the map edge. Don't add a separate border contour — border sub-segments are
