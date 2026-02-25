@@ -130,7 +130,7 @@ pub fn trace_contours(
                         is_obstacle,
                         &mut label_map,
                     );
-                    fill_hole(&hole_contour, label_id, &mut label_map);
+                    fill_hole(&hole_contour, &mut label_map, is_obstacle);
                     holes.push(LabeledContour {
                         points: hole_contour.points.clone(),
                         label: label_id,
@@ -147,6 +147,51 @@ pub fn trace_contours(
         holes.len()
     );
     (contours, holes, label_map)
+}
+
+/// Dump the first aborted contour to a diagnostic image.
+/// Only writes once (uses a static flag to avoid spamming).
+fn dump_aborted_contour(contour: &Contour, w: i32, h: i32, sx: i32, sy: i32) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DUMPED: AtomicBool = AtomicBool::new(false);
+    if DUMPED.swap(true, Ordering::Relaxed) {
+        return; // already dumped one
+    }
+
+    let wu = w as u32;
+    let hu = h as u32;
+    let mut img = image::RgbImage::new(wu, hu);
+
+    // Draw the contour path: fade from green (start) to red (end)
+    let n = contour.points.len();
+    for i in 0..n {
+        let t = i as f32 / n as f32;
+        let r = (t * 255.0) as u8;
+        let g = ((1.0 - t) * 255.0) as u8;
+        let p = contour.points[i];
+        if p.x >= 0 && p.x < w && p.y >= 0 && p.y < h {
+            img.put_pixel(p.x as u32, p.y as u32, image::Rgb([r, g, 0]));
+        }
+    }
+
+    // Mark the start pixel in bright cyan
+    if sx >= 0 && sx < w && sy >= 0 && sy < h {
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                let px = sx + dx;
+                let py = sy + dy;
+                if px >= 0 && px < w && py >= 0 && py < h {
+                    img.put_pixel(px as u32, py as u32, image::Rgb([0, 255, 255]));
+                }
+            }
+        }
+    }
+
+    let path = "aborted_contour.png";
+    match img.save(path) {
+        Ok(_) => eprintln!("    Dumped aborted contour ({} pts) to {}", n, path),
+        Err(e) => eprintln!("    Failed to dump aborted contour: {}", e),
+    }
 }
 
 fn trace_contour(
@@ -187,6 +232,7 @@ fn trace_contour(
             if contour.len() > MAX_CONTOUR_POINTS {
                 eprintln!("    WARNING: contour starting at ({},{}) exceeded {} pts, aborting trace",
                     sx, sy, MAX_CONTOUR_POINTS);
+                dump_aborted_contour(&contour, w, h, sx, sy);
                 break;
             }
 
@@ -242,7 +288,11 @@ fn tracer(
     }
 }
 
-fn fill_hole(hole: &Contour, _label_id: i32, label_map: &mut Vec<Vec<i32>>) {
+fn fill_hole(
+    hole: &Contour,
+    label_map: &mut Vec<Vec<i32>>,
+    is_obstacle: &dyn Fn(u32, u32) -> bool,
+) {
     let bounds = match hole.bounds() {
         Some(b) => b,
         None => return,
@@ -268,9 +318,12 @@ fn fill_hole(hole: &Contour, _label_id: i32, label_map: &mut Vec<Vec<i32>>) {
                 }
                 if inside {
                     for x in min..max {
-                        // Use -1 (background/visited) instead of label_id so the
-                        // graph builder doesn't reject passable pixels inside holes.
-                        label_map[y as usize][x as usize] = -1;
+                        // Only mark non-obstacle pixels; obstacle pixels inside
+                        // the hole (e.g. pillars) must keep label_map == 0 so
+                        // the column scanner will trace them as new contours.
+                        if !is_obstacle(x as u32, y as u32) {
+                            label_map[y as usize][x as usize] = -1;
+                        }
                     }
                 }
             }
