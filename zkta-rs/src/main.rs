@@ -150,16 +150,7 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         *pixel = image::Rgb([0, 0, 0]);
     }
 
-    // Draw label map in dark gray
-    for y in 0..h {
-        for x in 0..w {
-            if result.label_map[y as usize][x as usize] != 0 {
-                img.put_pixel(x, y, image::Rgb([50, 50, 50]));
-            }
-        }
-    }
-
-    // Region boundary fills (bottom layer, drawn first so everything else goes on top)
+    // Region boundary fills (bottom layer)
     let mut rng_state = 42u64;
     let mut region_colors: Vec<([u8; 3], [u8; 3])> = Vec::new();
     for r in &result.regions {
@@ -169,6 +160,16 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         region_colors.push((color, fill_color));
         if r.is_closed && r.polygon.len() >= 3 {
             render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
+        }
+    }
+
+    // Draw obstacle fill on top of region fills so obstacles mask any
+    // region polygon that incorrectly extends into obstacle territory.
+    for y in 0..h {
+        for x in 0..w {
+            if result.label_map[y as usize][x as usize] > 0 {
+                img.put_pixel(x, y, image::Rgb([50, 50, 50]));
+            }
         }
     }
 
