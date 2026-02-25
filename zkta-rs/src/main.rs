@@ -182,13 +182,18 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         }
     }
 
-    // Region boundary outlines
+    // Region boundary outlines + 2px inset colored border
     for (i, r) in result.regions.iter().enumerate() {
         if r.is_closed && r.polygon.len() >= 3 {
             let color = region_colors[i].0;
             for j in 0..r.polygon.len() {
                 let k = (j + 1) % r.polygon.len();
                 render::draw_line(&mut img, r.polygon[j], r.polygon[k], color);
+            }
+            let inset = inset_polygon(&r.polygon, 2.0);
+            for j in 0..inset.len() {
+                let k = (j + 1) % inset.len();
+                render::draw_line(&mut img, inset[j], inset[k], color);
             }
         }
     }
@@ -253,6 +258,67 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
     } else {
         eprintln!("Saved {}", output_path);
     }
+}
+
+/// Shrink a polygon inward by `offset` pixels along averaged vertex normals.
+fn inset_polygon(polygon: &[zkta::geometry::Point], offset: f64) -> Vec<zkta::geometry::Point> {
+    use zkta::geometry::Point;
+
+    let n = polygon.len();
+    if n < 3 {
+        return polygon.to_vec();
+    }
+
+    // Centroid — used to determine "inward" direction
+    let cx = polygon.iter().map(|p| p.x as f64).sum::<f64>() / n as f64;
+    let cy = polygon.iter().map(|p| p.y as f64).sum::<f64>() / n as f64;
+
+    let mut result = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = polygon[(i + n - 1) % n];
+        let curr = polygon[i];
+        let next = polygon[(i + 1) % n];
+
+        let e1x = (curr.x - prev.x) as f64;
+        let e1y = (curr.y - prev.y) as f64;
+        let e2x = (next.x - curr.x) as f64;
+        let e2y = (next.y - curr.y) as f64;
+
+        let to_cx = cx - curr.x as f64;
+        let to_cy = cy - curr.y as f64;
+
+        // Pick the perpendicular that points inward for each edge
+        let n1 = if (-e1y) * to_cx + e1x * to_cy > 0.0 {
+            (-e1y, e1x)
+        } else {
+            (e1y, -e1x)
+        };
+        let n2 = if (-e2y) * to_cx + e2x * to_cy > 0.0 {
+            (-e2y, e2x)
+        } else {
+            (e2y, -e2x)
+        };
+
+        let len1 = (n1.0 * n1.0 + n1.1 * n1.1).sqrt();
+        let len2 = (n2.0 * n2.0 + n2.1 * n2.1).sqrt();
+        if len1 < 1e-9 || len2 < 1e-9 {
+            result.push(curr);
+            continue;
+        }
+
+        let avg_nx = n1.0 / len1 + n2.0 / len2;
+        let avg_ny = n1.1 / len1 + n2.1 / len2;
+        let avg_len = (avg_nx * avg_nx + avg_ny * avg_ny).sqrt();
+        if avg_len < 1e-9 {
+            result.push(curr);
+            continue;
+        }
+
+        let ox = curr.x as f64 + offset * avg_nx / avg_len;
+        let oy = curr.y as f64 + offset * avg_ny / avg_len;
+        result.push(Point::new(ox.round() as i32, oy.round() as i32));
+    }
+    result
 }
 
 fn pseudo_random(state: &mut u64) -> f32 {
