@@ -130,7 +130,7 @@ pub fn trace_contours(
                         is_obstacle,
                         &mut label_map,
                     );
-                    fill_hole(&hole_contour, &mut label_map, is_obstacle);
+                    flood_fill_hole(cx, cy, w, h, &mut label_map, is_obstacle);
                     holes.push(LabeledContour {
                         points: hole_contour.points.clone(),
                         label: label_id,
@@ -288,45 +288,52 @@ fn tracer(
     }
 }
 
-fn fill_hole(
-    hole: &Contour,
+/// BFS flood fill from the hole entry point.
+///
+/// Marks all passable pixels reachable from (start_x, start_y) as -1,
+/// stopping at obstacle pixels.  This correctly handles nested obstacles
+/// inside holes: the flood cannot cross obstacle boundaries, so passable
+/// areas enclosed by inner obstacles remain at label_map == 0 and will be
+/// detected as holes by the column scanner when it reaches them.
+fn flood_fill_hole(
+    start_x: i32,
+    start_y: i32,
+    w: i32,
+    h: i32,
     label_map: &mut Vec<Vec<i32>>,
     is_obstacle: &dyn Fn(u32, u32) -> bool,
 ) {
-    let bounds = match hole.bounds() {
-        Some(b) => b,
-        None => return,
-    };
+    use std::collections::VecDeque;
 
-    for y in bounds[2]..bounds[3] {
-        let mut scan_line: Vec<i32> = hole
-            .points
-            .iter()
-            .filter(|p| p.y == y)
-            .map(|p| p.x)
-            .collect();
-        scan_line.sort();
+    if start_x < 0 || start_x >= w || start_y < 0 || start_y >= h {
+        return;
+    }
+    if label_map[start_y as usize][start_x as usize] != 0 {
+        return;
+    }
+    if is_obstacle(start_x as u32, start_y as u32) {
+        return;
+    }
 
-        if scan_line.len() > 1 {
-            let mut inside = false;
-            for n in 0..scan_line.len() - 1 {
-                inside = !inside;
-                let min = scan_line[n];
-                let max = scan_line[n + 1];
-                if max <= min + 1 {
-                    inside = false;
-                }
-                if inside {
-                    for x in min..max {
-                        // Only mark non-obstacle pixels; obstacle pixels inside
-                        // the hole (e.g. pillars) must keep label_map == 0 so
-                        // the column scanner will trace them as new contours.
-                        if !is_obstacle(x as u32, y as u32) {
-                            label_map[y as usize][x as usize] = -1;
-                        }
-                    }
-                }
+    label_map[start_y as usize][start_x as usize] = -1;
+    let mut queue = VecDeque::new();
+    queue.push_back((start_x, start_y));
+
+    while let Some((x, y)) = queue.pop_front() {
+        for &(dx, dy) in &[(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+            let nx = x + dx;
+            let ny = y + dy;
+            if nx < 0 || nx >= w || ny < 0 || ny >= h {
+                continue;
             }
+            if label_map[ny as usize][nx as usize] != 0 {
+                continue;
+            }
+            if is_obstacle(nx as u32, ny as u32) {
+                continue;
+            }
+            label_map[ny as usize][nx as usize] = -1;
+            queue.push_back((nx, ny));
         }
     }
 }
