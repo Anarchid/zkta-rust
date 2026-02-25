@@ -174,6 +174,7 @@ fn trace_contour(
         let mut tracing_stop_flag = false;
         let mut keep_searching = true;
 
+        const MAX_CONTOUR_POINTS: usize = 100_000;
         while keep_searching {
             label_map[py as usize][px as usize] = label_id;
             let np = tracer(px, py, (pdir + 6) % 8, w, h, is_obstacle, label_map);
@@ -181,6 +182,12 @@ fn trace_contour(
             px = np.x;
             py = np.y;
             pdir = np.direction;
+
+            if contour.len() > MAX_CONTOUR_POINTS {
+                eprintln!("    WARNING: contour starting at ({},{}) exceeded {} pts, aborting trace",
+                    sx, sy, MAX_CONTOUR_POINTS);
+                break;
+            }
 
             if px == sx && py == sy {
                 tracing_stop_flag = true;
