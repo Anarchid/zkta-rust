@@ -1,5 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use image::Rgba;
 use serde::Serialize;
@@ -262,119 +265,262 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
 }
 
-/// Run analysis for a single tier and save results.
-fn run_tier(result: &AnalysisResult, tier_name: &str, results_dir: &str) {
-    let dir = format!("{}/{}", results_dir, tier_name);
+/// Save analysis results for a single tier.
+fn save_tier_results(result: &AnalysisResult, tier_name: &str, output_dir: &str) {
+    let dir = format!("{}/{}", output_dir, tier_name);
     render_final_result(result, &format!("{}/08_final.png", dir));
     export_to_json(result, &format!("{}/result.json", dir));
+}
+
+// ---- CLI helpers ----
+
+fn find_arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+}
+
+fn parse_tiers(args: &[String]) -> Vec<MoveTier> {
+    if let Some(s) = find_arg(args, "--tiers") {
+        s.split(',')
+            .filter_map(|name| {
+                MoveTier::from_name(name.trim()).or_else(|| {
+                    eprintln!("Unknown tier: {}", name.trim());
+                    None
+                })
+            })
+            .collect()
+    } else {
+        MoveTier::ALL.to_vec()
+    }
+}
+
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+fn parse_timeout(args: &[String]) -> u64 {
+    find_arg(args, "--timeout")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+}
+
+// ---- render-map subcommand ----
+
+fn cmd_render_map(args: &[String]) {
+    let map_path = args.first().unwrap_or_else(|| {
+        eprintln!("Usage: zkta-rs render-map <path.zktamap> [--output-dir <dir>] [--tiers t1,t2,...]");
+        std::process::exit(1);
+    });
+
+    let output_dir = find_arg(args, "--output-dir").unwrap_or(".");
+    let tiers = parse_tiers(args);
+
+    let map_data = match SpringMapData::load(std::path::Path::new(map_path)) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to load {}: {}", map_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    fs::create_dir_all(output_dir).ok();
+
+    eprintln!(
+        "Map: {}x{} heightmap squares, {}x{} slope cells",
+        map_data.map_width, map_data.map_height,
+        map_data.slope_width, map_data.slope_height,
+    );
+
+    // Render heightmap
+    render_heightmap(&map_data, &format!("{}/heightmap.png", output_dir));
+
+    // Render slopemap
+    render_slopemap(&map_data, &format!("{}/slopemap.png", output_dir));
+
+    // Render passability per tier
+    for tier in &tiers {
+        render_passability(&map_data, *tier, &format!("{}/{}_passability.png", output_dir, tier.name()));
+    }
+
+    eprintln!("Map visualizations saved to {}", output_dir);
+}
+
+fn render_heightmap(map_data: &SpringMapData, output_path: &str) {
+    let w = map_data.map_width + 1;
+    let h = map_data.map_height + 1;
+
+    let min_h = map_data.height_map.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_h = map_data.height_map.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = (max_h - min_h).max(1.0);
+
+    let mut img = image::RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            let normalized = ((map_data.height_map[idx] - min_h) / range * 255.0) as u8;
+            img.put_pixel(x, y, image::Rgb([normalized, normalized, normalized]));
+        }
+    }
+
+    match img.save(output_path) {
+        Ok(()) => eprintln!("Saved {} (height range {:.1}..{:.1})", output_path, min_h, max_h),
+        Err(e) => eprintln!("Failed to save {}: {}", output_path, e),
+    }
+}
+
+fn render_slopemap(map_data: &SpringMapData, output_path: &str) {
+    let w = map_data.slope_width;
+    let h = map_data.slope_height;
+
+    let mut img = image::RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            // slope is 0.0 (flat) to ~1.0 (vertical cliff)
+            let val = (map_data.slope_map[idx].clamp(0.0, 1.0) * 255.0) as u8;
+            img.put_pixel(x, y, image::Rgb([val, val, val]));
+        }
+    }
+
+    match img.save(output_path) {
+        Ok(()) => eprintln!("Saved {}", output_path),
+        Err(e) => eprintln!("Failed to save {}: {}", output_path, e),
+    }
+}
+
+fn render_passability(map_data: &SpringMapData, tier: MoveTier, output_path: &str) {
+    let (obstacle_map, w, h) = map_data.compute_obstacle_map(tier);
+
+    let mut img = image::RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            let color = if obstacle_map[idx] { 0u8 } else { 255u8 };
+            img.put_pixel(x, y, image::Rgb([color, color, color]));
+        }
+    }
+
+    match img.save(output_path) {
+        Ok(()) => eprintln!("Saved {}", output_path),
+        Err(e) => eprintln!("Failed to save {}: {}", output_path, e),
+    }
+}
+
+// ---- analyze subcommand ----
+
+fn cmd_analyze(args: &[String]) {
+    let map_path = args.first().unwrap_or_else(|| {
+        eprintln!("Usage: zkta-rs analyze <path.zktamap> [--output-dir <dir>] [--tiers t1,t2,...] [--timeout <secs>]");
+        std::process::exit(1);
+    });
+
+    let output_dir = find_arg(args, "--output-dir").unwrap_or("results");
+    let tiers = parse_tiers(args);
+    let timeout_secs = parse_timeout(args);
+
+    if tiers.is_empty() {
+        eprintln!("No valid tiers specified");
+        return;
+    }
+
+    let map_data = match SpringMapData::load(std::path::Path::new(map_path)) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to load {}: {}", map_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!(
+        "Map: {}x{} heightmap squares, {}x{} slope cells",
+        map_data.map_width, map_data.map_height,
+        map_data.slope_width, map_data.slope_height,
+    );
+
+    fs::create_dir_all(output_dir).ok();
+
+    for tier in &tiers {
+        eprintln!("=== {} tier analysis (timeout {}s) ===", tier.name(), timeout_secs);
+        let (obstacle_map, w, h) = map_data.compute_obstacle_map(*tier);
+        let tier_dir = PathBuf::from(format!("{}/{}", output_dir, tier.name()));
+        let tier_name = tier.name().to_string();
+        let out = output_dir.to_string();
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let renderer = DiagnosticRenderer::new(tier_dir);
+            let result = analyzer::analyze_bitmap(&obstacle_map, w, h, &renderer);
+            tx.send(result).ok();
+        });
+
+        match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+            Ok(result) => {
+                save_tier_results(&result, &tier_name, &out);
+            }
+            Err(_) => {
+                eprintln!("WARNING: {} tier timed out after {}s, skipping", tier_name, timeout_secs);
+            }
+        }
+    }
+
+    let tier_names: Vec<&str> = tiers.iter().map(|t| t.name()).collect();
+    eprintln!("Analysis complete. Tiers: {}", tier_names.join(", "));
+}
+
+// ---- legacy image mode ----
+
+fn cmd_legacy_image(input_path: &str) {
+    fs::create_dir_all("results").ok();
+
+    let img = match image::open(input_path) {
+        Ok(img) => img.to_rgba8(),
+        Err(e) => {
+            eprintln!("Failed to load {}: {}", input_path, e);
+            return;
+        }
+    };
+
+    let bot_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 };
+    let vehicle_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 || pixel[1] > 0 };
+
+    eprintln!("=== Bot tier analysis ===");
+    let bot_renderer = DiagnosticRenderer::new(PathBuf::from("results/bot"));
+    let bot_result = analyzer::analyze(&img, &bot_obstacle, &bot_renderer);
+    save_tier_results(&bot_result, "bot", "results");
+
+    eprintln!("=== Vehicle tier analysis ===");
+    let vehicle_renderer = DiagnosticRenderer::new(PathBuf::from("results/vehicle"));
+    let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle, &vehicle_renderer);
+    save_tier_results(&vehicle_result, "vehicle", "results");
+
+    eprintln!("Analysis complete. Results in results/bot/ and results/vehicle/");
+}
+
+// ---- main ----
+
+fn print_usage() {
+    eprintln!("Usage:");
+    eprintln!("  zkta-rs render-map <path.zktamap> [--output-dir <dir>] [--tiers t1,t2,...]");
+    eprintln!("  zkta-rs analyze    <path.zktamap> [--output-dir <dir>] [--tiers t1,t2,...] [--timeout <secs>]");
+    eprintln!("  zkta-rs <image.png>               (legacy image analysis)");
+    eprintln!();
+    eprintln!("Subcommands:");
+    eprintln!("  render-map   Render heightmap, slopemap, and passability PNGs from a .zktamap file");
+    eprintln!("  analyze      Run full terrain analysis on a .zktamap file");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --output-dir <dir>      Output directory (default: results)");
+    eprintln!("  --tiers t1,t2,...       Tiers to process: spider,bot,vehicle,hover,ship,amphib");
+    eprintln!("  --timeout <secs>        Per-tier timeout in seconds (default: {})", DEFAULT_TIMEOUT_SECS);
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let headless = args.iter().any(|a| a == "--headless" || a == "-d");
-    if headless {
-        eprintln!("Running in headless mode");
-    }
-
-    // Check for --spring mode
-    let spring_idx = args.iter().position(|a| a == "--spring");
-    let tiers_idx = args.iter().position(|a| a == "--tiers");
-
-    if let Some(idx) = spring_idx {
-        // Spring map mode
-        let map_path = args.get(idx + 1).unwrap_or_else(|| {
-            eprintln!("Usage: zkta-rs --spring <path.zktamap> [--tiers bot,vehicle,...]");
-            std::process::exit(1);
-        });
-
-        // Parse tiers
-        let tiers: Vec<MoveTier> = if let Some(ti) = tiers_idx {
-            args.get(ti + 1)
-                .map(|s| {
-                    s.split(',')
-                        .filter_map(|name| {
-                            MoveTier::from_name(name.trim()).or_else(|| {
-                                eprintln!("Unknown tier: {}", name.trim());
-                                None
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_else(|| MoveTier::ALL.to_vec())
-        } else {
-            MoveTier::ALL.to_vec()
-        };
-
-        if tiers.is_empty() {
-            eprintln!("No valid tiers specified");
-            return;
-        }
-
-        // Load .zktamap
-        let map_data = match SpringMapData::load(std::path::Path::new(map_path)) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to load {}: {}", map_path, e);
-                return;
-            }
-        };
-
-        eprintln!(
-            "Spring map: {}x{} heightmap squares, {}x{} slope cells",
-            map_data.map_width, map_data.map_height,
-            map_data.slope_width, map_data.slope_height,
-        );
-
-        // Create results directory
-        fs::create_dir_all("results").ok();
-
-        // Analyze each tier
-        for tier in &tiers {
-            eprintln!("=== {} tier analysis ===", tier.name());
-            let (obstacle_map, w, h) = map_data.compute_obstacle_map(*tier);
-            let renderer = DiagnosticRenderer::new(PathBuf::from(format!("results/{}", tier.name())));
-            let result = analyzer::analyze_bitmap(&obstacle_map, w, h, &renderer);
-            run_tier(&result, tier.name(), "results");
-        }
-
-        let tier_names: Vec<&str> = tiers.iter().map(|t| t.name()).collect();
-        eprintln!("Spring analysis complete. Tiers: {}", tier_names.join(", "));
-    } else {
-        // Legacy image mode
-        let input_path = args
-            .iter()
-            .find(|a| !a.starts_with('-') && *a != &args[0])
-            .map(|s| s.as_str())
-            .unwrap_or("trojan.png");
-
-        // Create results directory
-        fs::create_dir_all("results").ok();
-
-        // Load image
-        let img = match image::open(input_path) {
-            Ok(img) => img.to_rgba8(),
-            Err(e) => {
-                eprintln!("Failed to load {}: {}", input_path, e);
-                return;
-            }
-        };
-
-        let bot_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 };
-        let vehicle_obstacle = |pixel: Rgba<u8>| -> bool { pixel[0] > 0 || pixel[1] > 0 };
-
-        // Bot tier analysis with diagnostic rendering
-        eprintln!("=== Bot tier analysis ===");
-        let bot_renderer = DiagnosticRenderer::new(PathBuf::from("results/bot"));
-        let bot_result = analyzer::analyze(&img, &bot_obstacle, &bot_renderer);
-        run_tier(&bot_result, "bot", "results");
-
-        // Vehicle tier analysis with diagnostic rendering
-        eprintln!("=== Vehicle tier analysis ===");
-        let vehicle_renderer = DiagnosticRenderer::new(PathBuf::from("results/vehicle"));
-        let vehicle_result = analyzer::analyze(&img, &vehicle_obstacle, &vehicle_renderer);
-        run_tier(&vehicle_result, "vehicle", "results");
-
-        eprintln!("Analysis complete. Results in results/bot/ and results/vehicle/");
+    match args.get(1).map(|s| s.as_str()) {
+        Some("render-map") => cmd_render_map(&args[2..]),
+        Some("analyze") => cmd_analyze(&args[2..]),
+        Some(arg) if !arg.starts_with('-') => cmd_legacy_image(arg),
+        _ => print_usage(),
     }
 }

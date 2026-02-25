@@ -2,36 +2,50 @@
 # zkta-analyze-map.sh — Extract map data via the engine and run terrain analysis.
 #
 # Usage:
-#   ./zkta-analyze-map.sh <MapName> [tier1,tier2,...]
+#   ./zkta-analyze-map.sh extract <MapName>                    Extract .zktamap from engine
+#   ./zkta-analyze-map.sh render  <MapName> [tiers]            Render heightmap/slope/passability
+#   ./zkta-analyze-map.sh analyze <MapName> [tiers] [timeout]  Run terrain analysis
+#   ./zkta-analyze-map.sh all     <MapName> [tiers] [timeout]  All of the above
 #
 # Examples:
-#   ./zkta-analyze-map.sh "TitanDuel 2.2"
-#   ./zkta-analyze-map.sh "Red Comet" bot,vehicle
-#   ./zkta-analyze-map.sh "Quicksilver 1.1" spider,bot,vehicle,hover,ship,amphib
+#   ./zkta-analyze-map.sh extract "Thornford 2"
+#   ./zkta-analyze-map.sh render  "Thornford 2" bot,vehicle
+#   ./zkta-analyze-map.sh analyze "Thornford 2" bot,vehicle 10
+#   ./zkta-analyze-map.sh all     "Quicksilver 1.1"
+#
+# Results are stored in results/<MapName>/ with per-tier subdirectories.
 
 set -euo pipefail
 
-MAP="${1:?Usage: $0 <MapName> [tiers]}"
-TIERS="${2:-spider,bot,vehicle,hover,ship,amphib}"
-OUTDIR="/tmp/zkta"
+CMD="${1:?Usage: $0 <extract|render|analyze|all> <MapName> [tiers] [timeout]}"
+MAP="${2:?Usage: $0 $CMD <MapName> [tiers] [timeout]}"
+TIERS="${3:-spider,bot,vehicle,hover,ship,amphib}"
+TIMEOUT="${4:-10}"
+
+RESULTS_DIR="results/$MAP"
+MAPFILE="$RESULTS_DIR/map.zktamap"
 
 # --- Configurable paths ---
 ENGINE_DIR="${ENGINE_DIR:-$HOME/.spring/engine/linux64/2025.06.18}"
 ENGINE="$ENGINE_DIR/spring-headless"
 GAMETYPE="${GAMETYPE:-Zero-K \$VERSION}"
 ZKTA_RS="${ZKTA_RS:-$(dirname "$0")/zkta-rs/target/release/zkta-rs}"
+TMPDIR_EXTRACT="/tmp/zkta"
 
-if [ ! -x "$ENGINE" ]; then
-    echo "Engine not found: $ENGINE"
-    echo "Set ENGINE_DIR to point to your engine installation."
-    exit 1
-fi
+# --- Functions ---
 
-# --- Generate startscript ---
-SCRIPT=$(mktemp /tmp/zkta_script_XXXXXX.txt)
-trap 'rm -f "$SCRIPT"' EXIT
+do_extract() {
+    if [ ! -x "$ENGINE" ]; then
+        echo "Engine not found: $ENGINE"
+        echo "Set ENGINE_DIR to point to your engine installation."
+        exit 1
+    fi
 
-cat > "$SCRIPT" << STARTSCRIPT
+    # Generate startscript
+    SCRIPT=$(mktemp /tmp/zkta_script_XXXXXX.txt)
+    trap 'rm -f "$SCRIPT"' EXIT
+
+    cat > "$SCRIPT" << STARTSCRIPT
 [game]
 {
 mapname=$MAP;
@@ -57,7 +71,7 @@ team=0;
 host=0;
 [options]
 {
-output_dir=$OUTDIR;
+output_dir=$TMPDIR_EXTRACT;
 }
 }
 [team0]
@@ -75,32 +89,78 @@ numallies=0;
 }
 STARTSCRIPT
 
-echo "=== Extracting map data: $MAP ==="
-mkdir -p "$OUTDIR"
+    echo "=== Extracting map data: $MAP ==="
+    mkdir -p "$TMPDIR_EXTRACT"
 
-# Run engine headless — it will init the AI, which writes the .zktamap, then we kill it
-# The engine may hang after init, so timeout after 30s
-timeout 30 "$ENGINE" "$SCRIPT" || true
+    # Run engine headless — it will init the AI, which writes the .zktamap, then we kill it
+    timeout 30 "$ENGINE" "$SCRIPT" || true
 
-# Find the .zktamap file
-MAPFILE=$(find "$OUTDIR" -name "*.zktamap" -newer "$SCRIPT" -print -quit 2>/dev/null)
-if [ -z "$MAPFILE" ]; then
-    echo "ERROR: No .zktamap file produced in $OUTDIR"
-    echo "Check engine AI log for errors."
-    exit 1
-fi
+    # Find the .zktamap file
+    EXTRACTED=$(find "$TMPDIR_EXTRACT" -name "*.zktamap" -newer "$SCRIPT" -print -quit 2>/dev/null)
+    if [ -z "$EXTRACTED" ]; then
+        echo "ERROR: No .zktamap file produced in $TMPDIR_EXTRACT"
+        echo "Check engine AI log for errors."
+        exit 1
+    fi
 
-echo "=== Map data extracted: $MAPFILE ==="
-echo "=== Running terrain analysis (tiers: $TIERS) ==="
+    # Copy to per-map results dir
+    mkdir -p "$RESULTS_DIR"
+    cp "$EXTRACTED" "$MAPFILE"
+    echo "=== Map data extracted: $MAPFILE ==="
+}
 
-# Run zkta-rs in Spring mode
-if [ -x "$ZKTA_RS" ]; then
-    "$ZKTA_RS" --spring "$MAPFILE" --tiers "$TIERS"
-else
-    echo "zkta-rs binary not found at $ZKTA_RS"
-    echo "Build it with: cd zkta-rs && cargo build --release"
-    echo "Or run manually: zkta-rs --spring $MAPFILE --tiers $TIERS"
-    exit 1
-fi
+require_mapfile() {
+    if [ ! -f "$MAPFILE" ]; then
+        echo "ERROR: $MAPFILE not found."
+        echo "Run '$0 extract \"$MAP\"' first."
+        exit 1
+    fi
+}
+
+require_zkta_rs() {
+    if [ ! -x "$ZKTA_RS" ]; then
+        echo "zkta-rs binary not found at $ZKTA_RS"
+        echo "Build it with: cd zkta-rs && cargo build --release"
+        exit 1
+    fi
+}
+
+do_render() {
+    require_mapfile
+    require_zkta_rs
+    echo "=== Rendering map visualizations ==="
+    "$ZKTA_RS" render-map "$MAPFILE" --output-dir "$RESULTS_DIR" --tiers "$TIERS"
+}
+
+do_analyze() {
+    require_mapfile
+    require_zkta_rs
+    echo "=== Running terrain analysis (tiers: $TIERS, timeout: ${TIMEOUT}s) ==="
+    "$ZKTA_RS" analyze "$MAPFILE" --output-dir "$RESULTS_DIR" --tiers "$TIERS" --timeout "$TIMEOUT"
+}
+
+# --- Dispatch ---
+
+case "$CMD" in
+    extract)
+        do_extract
+        ;;
+    render)
+        do_render
+        ;;
+    analyze)
+        do_analyze
+        ;;
+    all)
+        do_extract
+        do_render
+        do_analyze
+        ;;
+    *)
+        echo "Unknown command: $CMD"
+        echo "Usage: $0 <extract|render|analyze|all> <MapName> [tiers] [timeout]"
+        exit 1
+        ;;
+esac
 
 echo "=== Done ==="
