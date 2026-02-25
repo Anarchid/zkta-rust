@@ -154,7 +154,7 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         *pixel = image::Rgb([0, 0, 0]);
     }
 
-    // Draw label map in dark gray
+    // Draw obstacles from label map in dark gray (label > 0 only; holes are -1)
     for y in 0..h {
         for x in 0..w {
             if result.label_map[y as usize][x as usize] > 0 {
@@ -163,22 +163,16 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         }
     }
 
-    // Region boundary fills (bottom layer, drawn first so everything else goes on top)
+    // Region boundary fills
     let mut rng_state = 42u64;
     let mut region_colors: Vec<([u8; 3], [u8; 3])> = Vec::new();
     for r in &result.regions {
         let hue = pseudo_random(&mut rng_state);
         let color = hsv_to_rgb(hue, 0.8, 0.9);
-        let fill_color = [color[0] / 4, color[1] / 4, color[2] / 4];
+        let fill_color = [color[0] / 3, color[1] / 3, color[2] / 3];
         region_colors.push((color, fill_color));
         if r.is_closed && r.polygon.len() >= 3 {
             render::draw_filled_polygon(&mut img, &r.polygon, fill_color);
-            // Cut out interior obstacle holes
-            for hole in &r.holes {
-                if hole.len() >= 3 {
-                    render::draw_filled_polygon(&mut img, hole, [50, 50, 50]);
-                }
-            }
         }
     }
 
