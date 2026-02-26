@@ -700,11 +700,15 @@ pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
         }).collect();
         let ls = LineString::new(coords);
         let simplified = ls.simplify(&tolerance);
-        let pts: Vec<Point> = simplified
+        let mut pts: Vec<Point> = simplified
             .0
             .iter()
             .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
             .collect();
+        // Strip closing duplicate vertex from geo's LineString
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
         let contour = Contour::from_points(pts);
         if contour.len() > 3 && contour.area() > 100.0 {
             result.push(contour);
