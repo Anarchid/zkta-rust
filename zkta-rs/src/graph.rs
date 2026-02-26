@@ -425,11 +425,15 @@ pub fn contract_graph(graph: &mut RegionGraph) {
 }
 
 fn merge_contiguous(graph: &mut RegionGraph) {
+    // Track how many nodes have been merged into each survivor,
+    // so we can compute a running centroid.
+    let mut merge_count: HashMap<usize, usize> = HashMap::new();
+
     let mut merged = true;
     while merged {
         merged = false;
 
-        // Merge adjacent regions: keep larger radius
+        // Merge adjacent regions: keep larger radius, update position to centroid
         let region_ids: Vec<usize> = graph.region_nodes.iter().copied().collect();
         'region_merge: for &r in &region_ids {
             if !graph.region_nodes.contains(&r) {
@@ -445,6 +449,22 @@ fn merge_contiguous(graph: &mut RegionGraph) {
                     } else {
                         (n, r)
                     };
+
+                    // Update position to centroid of all merged nodes
+                    let keep_pos = graph.nodes[&keep].position;
+                    let remove_pos = graph.nodes[&remove].position;
+                    let keep_count = *merge_count.get(&keep).unwrap_or(&1);
+                    let remove_count = *merge_count.get(&remove).unwrap_or(&1);
+                    let total = keep_count + remove_count;
+                    let cx = (keep_pos.x as f64 * keep_count as f64
+                        + remove_pos.x as f64 * remove_count as f64)
+                        / total as f64;
+                    let cy = (keep_pos.y as f64 * keep_count as f64
+                        + remove_pos.y as f64 * remove_count as f64)
+                        / total as f64;
+                    graph.nodes.get_mut(&keep).unwrap().position =
+                        Point::new(cx.round() as i32, cy.round() as i32);
+                    merge_count.insert(keep, total);
 
                     // Transfer neighbors from remove to keep
                     let remove_neighbors: Vec<usize> = graph.neighbors(remove);

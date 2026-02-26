@@ -389,6 +389,38 @@ pub fn draw_line(img: &mut image::RgbImage, p1: Point, p2: Point, color: [u8; 3]
     }
 }
 
+pub fn draw_dashed_line(img: &mut image::RgbImage, p1: Point, p2: Point, color: [u8; 3], dash_len: u32) {
+    let (w, h) = img.dimensions();
+    let dx = (p2.x - p1.x).abs();
+    let dy = -(p2.y - p1.y).abs();
+    let sx = if p1.x < p2.x { 1 } else { -1 };
+    let sy = if p1.y < p2.y { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = p1.x;
+    let mut y = p1.y;
+    let mut step = 0u32;
+
+    loop {
+        let on = (step / dash_len) % 2 == 0;
+        if on && x >= 0 && x < w as i32 && y >= 0 && y < h as i32 {
+            img.put_pixel(x as u32, y as u32, image::Rgb(color));
+        }
+        if x == p2.x && y == p2.y {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+        step += 1;
+    }
+}
+
 fn draw_line_alpha(img: &mut image::RgbImage, p1: Point, p2: Point, color: [u8; 3], alpha: f32) {
     let (w, h) = img.dimensions();
     let dx = (p2.x - p1.x).abs();

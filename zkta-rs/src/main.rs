@@ -240,6 +240,30 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
         render::draw_label(&mut img, cp.position, &label, [255, 100, 100]);
     }
 
+    // Invading regions: dashed inset outline on top of everything
+    for (i, r) in result.regions.iter().enumerate() {
+        if r.invading && r.polygon.len() >= 3 {
+            let color = region_colors[i].0;
+            let inset = inset_polygon(&r.polygon, 3.0);
+            for j in 0..inset.len() {
+                let k = (j + 1) % inset.len();
+                render::draw_dashed_line(&mut img, inset[j], inset[k], color, 4);
+            }
+        }
+    }
+
+    // Debug arcs: eliminated (dotted, red) and retained (dashed, cyan)
+    for r in &result.regions {
+        for da in &r.debug_arcs {
+            for j in 0..da.eliminated.len().saturating_sub(1) {
+                render::draw_dashed_line(&mut img, da.eliminated[j], da.eliminated[j + 1], [255, 80, 80], 2);
+            }
+            for j in 0..da.retained.len().saturating_sub(1) {
+                render::draw_dashed_line(&mut img, da.retained[j], da.retained[j + 1], [80, 255, 255], 6);
+            }
+        }
+    }
+
     // Region seed nodes + labels (topmost layer)
     for r in &result.regions {
         render::draw_filled_circle(&mut img, r.center, 4, [64, 224, 208]);
