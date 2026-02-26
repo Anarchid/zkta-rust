@@ -161,15 +161,9 @@ fn analyze_inner(
     eprintln!("  [10/13] Computing chokepoints...");
     let (mut regions, mut chokepoints) = region::compute_chokepoint_gates(&graph, &rtree, w, h);
 
-    // Stage 10b: Insert synthetic chokepoints
-    region::insert_synthetic_chokepoints(
-        &mut graph,
-        &mut regions,
-        &mut chokepoints,
-        &simplified_contours,
-        outer_count,
-        &rtree,
-    );
+    // Stage 10b: Synthetic chokepoints disabled — the Voronoi medial axis
+    // handles narrow passages natively, and synthetic insertion caused more
+    // problems (spurious hole-wall chokepoints) than it solved.
 
     // Stage 11: Split contours at gate points
     region::split_contours_at_gate_points(&mut simplified_contours, &chokepoints);
