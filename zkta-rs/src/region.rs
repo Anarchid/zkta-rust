@@ -200,6 +200,7 @@ pub fn insert_synthetic_chokepoints(
     regions: &mut Vec<Region>,
     chokepoints: &mut Vec<Chokepoint>,
     contours: &[Contour],
+    outer_count: usize,
     rtree: &ObstacleRTree,
 ) {
     let gap_threshold = 8.0;
@@ -213,7 +214,11 @@ pub fn insert_synthetic_chokepoints(
     }
 
     let mut inserted = 0;
-    for (i, contour) in contours.iter().enumerate() {
+    // Only scan outer obstacle contours — hole contours are already Voronoi
+    // input edges, so the medial axis handles them natively.  Treating holes
+    // as independent obstacles creates spurious synthetic chokepoints (e.g.
+    // between a hole wall and the map border).
+    for (i, contour) in contours[..outer_count].iter().enumerate() {
         let obstacle_id = i + 1;
         for p_idx in 0..contour.len() {
             let pt = contour.points[p_idx];

@@ -167,6 +167,7 @@ fn analyze_inner(
         &mut regions,
         &mut chokepoints,
         &simplified_contours,
+        outer_count,
         &rtree,
     );
 
