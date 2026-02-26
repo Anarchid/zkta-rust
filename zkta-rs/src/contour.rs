@@ -384,7 +384,7 @@ pub fn make_contours_manifold(
             );
         }
         for part in parts {
-            if part.len() > 3 && part.area() > 100.0 {
+            if part.len() >= 3 && part.area() > 100.0 {
                 if is_hole {
                     new_holes.push(part);
                 } else {
@@ -752,30 +752,48 @@ pub fn clear_dropped_obstacles(
 }
 
 /// Simplify contours using Douglas-Peucker algorithm.
-/// Returns only contours with >= 4 points and area >= 100.
+/// Returns only contours with >= 3 points and area >= 100.
 pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
     let mut result = Vec::new();
-    for c in contours {
-        let coords: Vec<Coord<f64>> = c.points.iter().map(|p| Coord {
-            x: p.x as f64,
-            y: p.y as f64,
-        }).collect();
-        let ls = LineString::new(coords);
-        let simplified = ls.simplify(&tolerance);
-        let mut pts: Vec<Point> = simplified
-            .0
-            .iter()
-            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
-            .collect();
-        // Strip closing duplicate vertex from geo's LineString
-        if pts.len() > 1 && pts.first() == pts.last() {
-            pts.pop();
-        }
-        let contour = Contour::from_points(pts);
+    for (i, c) in contours.iter().enumerate() {
+        let full_area = c.area();
+        let contour = simplify_one(c, tolerance);
         if contour.len() >= 3 && contour.area() > 100.0 {
             result.push(contour);
+            continue;
+        }
+        // Thin but important obstacle: re-simplify with lower tolerance
+        // until we get a polygon.
+        if full_area > 100.0 {
+            let mut tol = tolerance / 2.0;
+            while tol >= 1.0 {
+                let retry = simplify_one(c, tol);
+                if retry.len() >= 3 {
+                    result.push(retry);
+                    break;
+                }
+                tol /= 2.0;
+            }
         }
     }
     eprintln!("Simplified to {} contours", result.len());
     result
+}
+
+fn simplify_one(c: &Contour, tolerance: f64) -> Contour {
+    let coords: Vec<Coord<f64>> = c.points.iter().map(|p| Coord {
+        x: p.x as f64,
+        y: p.y as f64,
+    }).collect();
+    let ls = LineString::new(coords);
+    let simplified = ls.simplify(&tolerance);
+    let mut pts: Vec<Point> = simplified
+        .0
+        .iter()
+        .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
+        .collect();
+    if pts.len() > 1 && pts.first() == pts.last() {
+        pts.pop();
+    }
+    Contour::from_points(pts)
 }

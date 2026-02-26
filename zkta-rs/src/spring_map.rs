@@ -187,8 +187,12 @@ impl MoveTier {
     /// Whether this slope+depth cell is an obstacle for this tier.
     pub fn is_obstacle(self, slope: f32, water_depth: f32) -> bool {
         match self {
+            // Spiders can climb vertical surfaces; only blocked by deep water
+            MoveTier::Spider => {
+                water_depth > LAND_WATER_DEPTH_MAX
+            }
             // Land units: blocked by steep slope OR deep water
-            MoveTier::Spider | MoveTier::Bot | MoveTier::Vehicle => {
+            MoveTier::Bot | MoveTier::Vehicle => {
                 slope >= self.slope_threshold() || water_depth > LAND_WATER_DEPTH_MAX
             }
             // Hover: on land check slope, on water always passable
