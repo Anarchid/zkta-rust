@@ -624,7 +624,7 @@ pub fn seal_dropped_holes(
             .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
             .collect();
         let contour = Contour::from_points(pts);
-        if contour.len() > 3 && contour.area() > 100.0 {
+        if contour.len() >= 3 && contour.area() > 100.0 {
             continue; // Survived simplification — keep as passable
         }
 
@@ -724,7 +724,7 @@ pub fn clear_dropped_obstacles(
             pts.pop();
         }
         let contour = Contour::from_points(pts);
-        if contour.len() > 3 && contour.area() > 100.0 {
+        if contour.len() >= 3 && contour.area() > 100.0 {
             continue; // Survived simplification
         }
         dropped_labels.insert(label);
@@ -772,7 +772,7 @@ pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
             pts.pop();
         }
         let contour = Contour::from_points(pts);
-        if contour.len() > 3 && contour.area() > 100.0 {
+        if contour.len() >= 3 && contour.area() > 100.0 {
             result.push(contour);
         }
     }
