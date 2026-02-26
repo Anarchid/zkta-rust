@@ -364,7 +364,7 @@ pub fn make_contours_manifold(
     simplified_contours: &mut Vec<Contour>,
     outer_count: usize,
 ) -> usize {
-    use crate::geometry::{closest_point_on_segment, point_in_polygon, segments_intersect};
+    use crate::geometry::{point_in_polygon, segments_intersect};
 
     // Phase 1: Split self-intersecting contours
     let mut new_outers: Vec<Contour> = Vec::new();
@@ -407,9 +407,11 @@ pub fn make_contours_manifold(
         );
     }
 
-    // Phase 2: Clip holes to parent obstacle boundaries
-    let mut total_snapped = 0usize;
-    let mut total_inserted = 0usize;
+    // Phase 2: Drop holes that intersect their parent obstacle boundary.
+    // Simplification can cause hole vertices to protrude outside the parent,
+    // creating intersecting voronoi input segments that corrupt the diagram.
+    // Rather than trying to clip (fragile), just drop the offending hole.
+    let mut holes_to_drop: Vec<usize> = Vec::new();
 
     for hi in new_outer_count..simplified_contours.len() {
         let hole_points = &simplified_contours[hi].points;
@@ -424,7 +426,6 @@ pub fn make_contours_manifold(
             / hole_points.len() as f64;
         let centroid = Point::new(cx.round() as i32, cy.round() as i32);
 
-        // Find the smallest enclosing outer contour (not just the first)
         let mut parent_idx = None;
         let mut parent_area = f64::MAX;
         for oi in 0..new_outer_count {
@@ -438,65 +439,41 @@ pub fn make_contours_manifold(
         }
 
         let Some(pi) = parent_idx else { continue };
+        let parent = &simplified_contours[pi].points;
 
-        let parent = simplified_contours[pi].points.clone();
-
-        // Snap protruding vertices
-        let hole = &mut simplified_contours[hi].points;
-        for p in hole.iter_mut() {
-            if !point_in_polygon(*p, &parent) {
-                let mut min_dist = f64::MAX;
-                let mut nearest = *p;
-                for j in 0..parent.len() {
-                    let a = parent[j];
-                    let b = parent[(j + 1) % parent.len()];
-                    let cp = closest_point_on_segment(*p, a, b);
-                    let d = p.dist(&cp);
-                    if d < min_dist {
-                        min_dist = d;
-                        nearest = cp;
-                    }
-                }
-                *p = nearest;
-                total_snapped += 1;
-            }
-        }
-
-        // Insert intersection points where hole edges cross parent edges
-        let mut insertions: Vec<(usize, Point)> = Vec::new();
-        let hole = &simplified_contours[hi].points;
-        let hn = hole.len();
-        for i in 0..hn {
-            let h1 = hole[i];
-            let h2 = hole[(i + 1) % hn];
-            for j in 0..parent.len() {
+        // Check if any hole edge intersects any parent edge
+        let hn = hole_points.len();
+        let pn = parent.len();
+        let mut intersects = false;
+        'check: for i in 0..hn {
+            let h1 = hole_points[i];
+            let h2 = hole_points[(i + 1) % hn];
+            for j in 0..pn {
                 let p1 = parent[j];
-                let p2 = parent[(j + 1) % parent.len()];
+                let p2 = parent[(j + 1) % pn];
                 if h1 == p1 || h1 == p2 || h2 == p1 || h2 == p2 {
                     continue;
                 }
                 if segments_intersect(h1, h2, p1, p2) {
-                    if let Some(ix) = segment_intersection_point(h1, h2, p1, p2) {
-                        insertions.push((i, ix));
-                    }
+                    intersects = true;
+                    break 'check;
                 }
             }
         }
 
-        insertions.sort_by_key(|(idx, _)| std::cmp::Reverse(*idx));
-        insertions.dedup_by_key(|(idx, _)| *idx);
-        let hole = &mut simplified_contours[hi].points;
-        for (after_idx, point) in &insertions {
-            hole.insert(after_idx + 1, *point);
-            total_inserted += 1;
+        if intersects {
+            holes_to_drop.push(hi);
         }
     }
 
-    if total_snapped > 0 || total_inserted > 0 {
+    if !holes_to_drop.is_empty() {
         eprintln!(
-            "Clipped holes: {} vertices snapped, {} intersection points inserted",
-            total_snapped, total_inserted
+            "Dropped {} hole(s) that intersect parent obstacle boundary",
+            holes_to_drop.len()
         );
+        for &hi in holes_to_drop.iter().rev() {
+            simplified_contours.remove(hi);
+        }
     }
 
     new_outer_count
