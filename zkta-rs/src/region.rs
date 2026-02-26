@@ -824,24 +824,24 @@ fn build_gated_boundary(
 
         // Rewind: find the last gate crossing in the path and prohibit the
         // edge after it, forcing BFS to explore the other direction next time.
-        let last_crossing = find_last_gate_crossing(&bfs.path, gates, start_gate_idx);
-        match last_crossing {
-            Some(path_idx) => {
-                let far_side = bfs.path[path_idx + 1];
-                if path_idx + 2 < bfs.path.len() {
-                    let wrong_next = bfs.path[path_idx + 2];
-                    eprintln!(
-                        "  R{}: rewind {}: prohibiting ({},{}) -> ({},{}) after gate crossing",
-                        region.id, rewind + 1,
-                        far_side.x, far_side.y, wrong_next.x, wrong_next.y,
-                    );
-                    prohibited_edges.insert((far_side, wrong_next));
-                    prohibited_edges.insert((wrong_next, far_side));
-                } else {
-                    break;
-                }
-            }
-            None => break,
+        // If no non-start gate was crossed (degenerate case: BFS shortcut
+        // through a pocket), rewind to start and prohibit its first edge.
+        let rewind_point = match find_last_gate_crossing(&bfs.path, gates, start_gate_idx) {
+            Some(path_idx) => path_idx + 1, // far side of last crossed gate
+            None => 0,                       // start itself
+        };
+        if rewind_point + 1 < bfs.path.len() {
+            let from = bfs.path[rewind_point];
+            let wrong_next = bfs.path[rewind_point + 1];
+            eprintln!(
+                "  R{}: rewind {}: prohibiting ({},{}) -> ({},{})",
+                region.id, rewind + 1,
+                from.x, from.y, wrong_next.x, wrong_next.y,
+            );
+            prohibited_edges.insert((from, wrong_next));
+            prohibited_edges.insert((wrong_next, from));
+        } else {
+            break;
         }
     }
 
