@@ -345,7 +345,7 @@ pub fn simplify_holes(holes: &[LabeledContour], tolerance: f64) -> Vec<Contour> 
         .iter()
         .map(|h| Contour::from_points(h.points.clone()))
         .collect();
-    let result = simplify_contours(&as_contours, tolerance);
+    let result = simplify_contours_inner(&as_contours, tolerance, false);
     eprintln!("Simplified {} holes to {} hole contours", holes.len(), result.len());
     result
 }
@@ -754,17 +754,21 @@ pub fn clear_dropped_obstacles(
 /// Simplify contours using Douglas-Peucker algorithm.
 /// Returns only contours with >= 3 points and area >= 100.
 pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
+    simplify_contours_inner(contours, tolerance, true)
+}
+
+fn simplify_contours_inner(contours: &[Contour], tolerance: f64, rescue_thin: bool) -> Vec<Contour> {
     let mut result = Vec::new();
-    for (i, c) in contours.iter().enumerate() {
-        let full_area = c.area();
+    for c in contours {
         let contour = simplify_one(c, tolerance);
         if contour.len() >= 3 && contour.area() > 100.0 {
             result.push(contour);
             continue;
         }
         // Thin but important obstacle: re-simplify with lower tolerance
-        // until we get a polygon.
-        if full_area > 100.0 {
+        // until we get a polygon.  Only for outer contours — rescuing thin
+        // holes changes topology and causes regressions.
+        if rescue_thin && c.area() > 100.0 {
             let mut tol = tolerance / 2.0;
             while tol >= 1.0 {
                 let retry = simplify_one(c, tol);
