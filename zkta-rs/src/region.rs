@@ -94,7 +94,7 @@ pub fn compute_chokepoint_gates(
         find_or_create_region(&mut regions, &mut node_to_region, r_node_id, graph);
     }
 
-    eprintln!("Computed {} chokepoint gates", chokepoints.len());
+    eprintln!("Computed {} chokepoint gates, {} regions", chokepoints.len(), regions.len());
     (regions, chokepoints)
 }
 
@@ -703,13 +703,24 @@ fn build_gated_boundary(
     let start = gates[start_gate_idx][0];
     let goal = gates[start_gate_idx][1];
 
-    for attempt in 0..4 {
+    // Collect all gate points other than start/goal, for pocket-arc detection.
+    let mut other_gate_points: HashSet<Point> = HashSet::new();
+    for gate in gates {
+        for &p in gate {
+            if p != start && p != goal {
+                other_gate_points.insert(p);
+            }
+        }
+    }
+
+    let max_retries = gates.len() + 2;
+    for attempt in 0..max_retries {
         let path = dijkstra(&adj_graph, start, goal, Some(gates[start_gate_idx]))?;
         if path.len() < 3 {
             return None;
         }
 
-        // Check for obstacle invasions
+        // --- Check 1: obstacle invasion (path encloses an obstacle) ---
         let mut invaded_obstacle = None;
         for &obstacle_id in &relevant_obstacles {
             let c = &contours[obstacle_id - 1];
@@ -720,70 +731,120 @@ fn build_gated_boundary(
             }
         }
 
-        if invaded_obstacle.is_none() {
-            return Some(path);
-        }
+        if let Some(invaded_id) = invaded_obstacle {
+            let invaded = &contours[invaded_id - 1];
 
-        let invaded_id = invaded_obstacle.unwrap();
-        let invaded = &contours[invaded_id - 1];
-
-        // Remove all edges of invaded obstacle
-        for i in 0..invaded.points.len() {
-            let p1 = invaded.points[i];
-            let p2 = invaded.points[(i + 1) % invaded.points.len()];
-            if let Some(neighbors) = adj_graph.get_mut(&p1) {
-                neighbors.retain(|p| *p != p2);
+            // Remove all edges of invaded obstacle
+            for i in 0..invaded.points.len() {
+                let p1 = invaded.points[i];
+                let p2 = invaded.points[(i + 1) % invaded.points.len()];
+                if let Some(neighbors) = adj_graph.get_mut(&p1) {
+                    neighbors.retain(|p| *p != p2);
+                }
+                if let Some(neighbors) = adj_graph.get_mut(&p2) {
+                    neighbors.retain(|p| *p != p1);
+                }
             }
-            if let Some(neighbors) = adj_graph.get_mut(&p2) {
-                neighbors.retain(|p| *p != p1);
-            }
-        }
 
-        // Re-add region-facing arc
-        let mut gate_indices: Vec<usize> = Vec::new();
-        for (g, ids) in gate_obstacle_ids.iter().enumerate() {
-            for side in 0..2 {
-                if ids[side] == invaded_id {
-                    if let Some(idx) = find_point_in_contour(invaded, gates[g][side]) {
-                        if !gate_indices.contains(&idx) {
-                            gate_indices.push(idx);
+            // Re-add region-facing arc
+            let mut gi: Vec<usize> = Vec::new();
+            for (g, ids) in gate_obstacle_ids.iter().enumerate() {
+                for side in 0..2 {
+                    if ids[side] == invaded_id {
+                        if let Some(idx) = find_point_in_contour(invaded, gates[g][side]) {
+                            if !gi.contains(&idx) {
+                                gi.push(idx);
+                            }
                         }
                     }
                 }
             }
+
+            if !gi.is_empty() {
+                let idx_a = gi[0];
+                let idx_b = if gi.len() >= 2 {
+                    gi[1]
+                } else {
+                    (idx_a + invaded.points.len() / 2) % invaded.points.len()
+                };
+                let arc_fwd = extract_arc(invaded, idx_a, idx_b);
+                let arc_rev = extract_arc(invaded, idx_b, idx_a);
+                let d_fwd = arc_centroid(&arc_fwd).dist_sq(&center);
+                let d_rev = arc_centroid(&arc_rev).dist_sq(&center);
+                let chosen = if d_fwd > d_rev { &arc_fwd } else { &arc_rev };
+                for j in 0..chosen.len() - 1 {
+                    add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
+                }
+            }
+
+            eprintln!(
+                "  R{}: invasion of O{}, replacing arc (attempt {})",
+                region.id, invaded_id, attempt + 1
+            );
+            continue;
         }
 
-        if !gate_indices.is_empty() {
-            let idx_a = gate_indices[0];
-            let idx_b = if gate_indices.len() >= 2 {
-                gate_indices[1]
-            } else {
-                (idx_a + invaded.points.len() / 2) % invaded.points.len()
-            };
-
-            let arc_fwd = extract_arc(invaded, idx_a, idx_b);
-            let arc_rev = extract_arc(invaded, idx_b, idx_a);
-            let centroid_fwd = arc_centroid(&arc_fwd);
-            let centroid_rev = arc_centroid(&arc_rev);
-            let d_fwd = centroid_fwd.dist_sq(&center);
-            let d_rev = centroid_rev.dist_sq(&center);
-            // Invasion means the initial closer-to-center arc was wrong;
-            // pick the arc farther from center instead.
-            let chosen = if d_fwd > d_rev { &arc_fwd } else { &arc_rev };
-            for j in 0..chosen.len() - 1 {
-                add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
+        // --- Check 2: pocket-arc shortcut ---
+        // For a region with multiple gates, the boundary must visit all gate
+        // points. If Dijkstra found a path that skips other gates, it took a
+        // shortcut through a pocket region's arc. Remove that arc and retry.
+        if !other_gate_points.is_empty() {
+            let visits_other = path.iter().any(|p| other_gate_points.contains(p));
+            if !visits_other {
+                // The path is a pocket-arc shortcut. Find which contour arc
+                // the path used and remove it.
+                let removed = remove_path_arcs_from_graph(&mut adj_graph, &path, contours, &relevant_obstacles);
+                eprintln!(
+                    "  R{}: pocket-arc shortcut (visited 0/{} other gate points), removed {} arc edges (attempt {})",
+                    region.id, other_gate_points.len(), removed, attempt + 1
+                );
+                continue;
             }
         }
 
-        eprintln!(
-            "  Invasion of O{} detected in R{}, replacing with region-facing arc (attempt {})",
-            invaded_id,
-            region.id,
-            attempt + 1
-        );
+        return Some(path);
     }
 
+    eprintln!("  R{}: boundary failed after {} retries", region.id, max_retries);
     None
+}
+
+/// Remove contour-arc edges that the path traversed.
+/// The path took a shortcut through a pocket arc; we identify consecutive path
+/// edges that lie on an obstacle contour and remove them from the adjacency graph.
+fn remove_path_arcs_from_graph(
+    adj_graph: &mut HashMap<Point, Vec<Point>>,
+    path: &[Point],
+    contours: &[Contour],
+    relevant_obstacles: &HashSet<usize>,
+) -> usize {
+    // Build a set of all contour edges (both directions) for quick lookup.
+    let mut contour_edges: HashSet<(Point, Point)> = HashSet::new();
+    for &obstacle_id in relevant_obstacles {
+        let c = &contours[obstacle_id - 1];
+        for i in 0..c.points.len() {
+            let a = c.points[i];
+            let b = c.points[(i + 1) % c.points.len()];
+            contour_edges.insert((a, b));
+            contour_edges.insert((b, a));
+        }
+    }
+
+    let mut removed = 0;
+    for i in 0..path.len() - 1 {
+        let a = path[i];
+        let b = path[i + 1];
+        if contour_edges.contains(&(a, b)) {
+            if let Some(neighbors) = adj_graph.get_mut(&a) {
+                neighbors.retain(|p| *p != b);
+                removed += 1;
+            }
+            if let Some(neighbors) = adj_graph.get_mut(&b) {
+                neighbors.retain(|p| *p != a);
+            }
+        }
+    }
+    removed
 }
 
 fn find_point_in_contour(c: &Contour, p: Point) -> Option<usize> {
