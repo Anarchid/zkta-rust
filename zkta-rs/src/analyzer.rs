@@ -101,6 +101,7 @@ fn analyze_inner(
     // Stage 2c: Seal dropped holes — overwrite -1 pixels from holes that didn't
     // survive simplification so graph builder rejects those areas as obstacle.
     contour::seal_dropped_holes(&holes, 8.0, &mut label_map, width, height);
+    contour::clear_dropped_obstacles(&full_contours, 8.0, &mut label_map, width, height);
 
     // Stage 2c: Paint border pixels in labelMap so graph builder rejects vertices
     // on the map edge. Don't add a separate border contour — border sub-segments are

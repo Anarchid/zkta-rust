@@ -689,6 +689,68 @@ pub fn seal_dropped_holes(
     }
 }
 
+/// Clear label-map pixels belonging to obstacle contours that were dropped
+/// during simplification (too few points or too small area).
+///
+/// Analogous to `seal_dropped_holes`: where that function *fills* dropped holes
+/// to mark them as obstacle, this function *clears* dropped obstacles to mark
+/// them as passable — keeping the label_map consistent with the simplified
+/// contours that the Voronoi diagram actually sees.
+pub fn clear_dropped_obstacles(
+    contours: &[Contour],
+    tolerance: f64,
+    label_map: &mut [Vec<i32>],
+    width: u32,
+    height: u32,
+) {
+    use std::collections::HashSet;
+
+    let mut dropped_labels: HashSet<i32> = HashSet::new();
+
+    for (i, c) in contours.iter().enumerate() {
+        let label = (i + 1) as i32; // label_map is 1-indexed
+        let coords: Vec<Coord<f64>> = c.points.iter().map(|p| Coord {
+            x: p.x as f64,
+            y: p.y as f64,
+        }).collect();
+        let ls = LineString::new(coords);
+        let simplified = ls.simplify(&tolerance);
+        let mut pts: Vec<Point> = simplified
+            .0
+            .iter()
+            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
+            .collect();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        let contour = Contour::from_points(pts);
+        if contour.len() > 3 && contour.area() > 100.0 {
+            continue; // Survived simplification
+        }
+        dropped_labels.insert(label);
+    }
+
+    if dropped_labels.is_empty() {
+        return;
+    }
+
+    let mut cleared = 0usize;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            if dropped_labels.contains(&label_map[y][x]) {
+                label_map[y][x] = 0;
+                cleared += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "Cleared {} pixels from {} dropped obstacles in label_map",
+        cleared,
+        dropped_labels.len()
+    );
+}
+
 /// Simplify contours using Douglas-Peucker algorithm.
 /// Returns only contours with >= 4 points and area >= 100.
 pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
