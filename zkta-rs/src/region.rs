@@ -621,6 +621,101 @@ fn build_single_contour_boundary(
     Some(obstacle_arc)
 }
 
+/// BFS result with path and set of chokepoint indices crossed during traversal.
+struct BfsResult {
+    path: Vec<Point>,
+    visited_chokes: HashSet<usize>,
+}
+
+/// BFS with forced gate crossing.
+///
+/// When the traversal reaches a vertex that is a gate point of an unvisited
+/// chokepoint belonging to this region, the only edge expanded is the gate
+/// edge to the partner point.  This forces the boundary path through every
+/// chokepoint gate.
+///
+/// * `gate_map` — maps each gate point to `(partner_point, gate_index)`
+/// * `initial_visited` — chokepoints already considered crossed (start choke)
+/// * `prohibited_edges` — directed edges that must not be traversed
+fn bfs_forced_gates(
+    graph: &HashMap<Point, Vec<Point>>,
+    start: Point,
+    goal: Point,
+    gate_map: &HashMap<Point, Vec<(Point, usize)>>,
+    initial_visited: &HashSet<usize>,
+    prohibited_edges: &HashSet<(Point, Point)>,
+) -> Option<BfsResult> {
+    use std::collections::VecDeque;
+
+    let mut prev: HashMap<Point, Point> = HashMap::new();
+    let mut visited_chokes = initial_visited.clone();
+    let mut queue: VecDeque<Point> = VecDeque::new();
+    let mut processed: HashSet<Point> = HashSet::new();
+
+    queue.push_back(start);
+
+    while let Some(point) = queue.pop_front() {
+        if processed.contains(&point) {
+            continue;
+        }
+        processed.insert(point);
+
+        if point == goal {
+            let mut path = Vec::new();
+            let mut p = goal;
+            loop {
+                path.push(p);
+                match prev.get(&p) {
+                    Some(&pr) => p = pr,
+                    None => break,
+                }
+            }
+            path.reverse();
+            return Some(BfsResult { path, visited_chokes });
+        }
+
+        // Check for forced gate crossing: if this point is a gate point of an
+        // unvisited chokepoint, only expand the gate edge.
+        let mut forced = false;
+        if let Some(entries) = gate_map.get(&point) {
+            for &(partner, gate_idx) in entries {
+                if !visited_chokes.contains(&gate_idx) {
+                    visited_chokes.insert(gate_idx);
+                    prev.insert(partner, point);
+                    // Allow re-exploration from the far side even if previously
+                    // reached from a different direction.
+                    processed.remove(&partner);
+                    queue.push_back(partner);
+                    forced = true;
+                    break; // cross one gate at a time
+                }
+            }
+        }
+        if forced {
+            continue;
+        }
+
+        // Normal BFS expansion
+        if let Some(neighbors) = graph.get(&point) {
+            for &neighbor in neighbors {
+                if processed.contains(&neighbor) {
+                    continue;
+                }
+                if prohibited_edges.contains(&(point, neighbor)) {
+                    continue;
+                }
+                // Only enqueue if not yet reached (start has no prev entry)
+                if !prev.contains_key(&neighbor) && neighbor != start {
+                    prev.insert(neighbor, point);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn build_gated_boundary(
     region: &Region,
     gates: &[[Point; 2]],
@@ -664,8 +759,6 @@ fn build_gated_boundary(
         if gate_indices.len() < 2 {
             if gate_indices.len() == 1 {
                 // 1 gate point: add only the region-facing arc.
-                // Pick the direction from the gate whose immediate next vertex
-                // is closer to the region center, then follow that half.
                 let gi = gate_indices[0];
                 let n = c.points.len();
                 let next_fwd = (gi + 1) % n;
@@ -734,8 +827,14 @@ fn build_gated_boundary(
     // 3. Add map boundary edges
     add_map_boundary_edges(&mut adj_graph, width, height);
 
-    // Pick starting chokepoint: prefer one that bridges two different obstacles,
-    // to avoid short-circuiting through a same-obstacle pocket arc.
+    // Build gate lookup: each gate point → [(partner, gate_index), ...]
+    let mut gate_map: HashMap<Point, Vec<(Point, usize)>> = HashMap::new();
+    for (i, gate) in gates.iter().enumerate() {
+        gate_map.entry(gate[0]).or_default().push((gate[1], i));
+        gate_map.entry(gate[1]).or_default().push((gate[0], i));
+    }
+
+    // Pick starting chokepoint: prefer one that bridges two different obstacles.
     let start_gate_idx = gate_obstacle_ids
         .iter()
         .position(|ids| ids[0] != ids[1])
@@ -743,32 +842,81 @@ fn build_gated_boundary(
     let start = gates[start_gate_idx][0];
     let goal = gates[start_gate_idx][1];
 
-    // Collect all gate points other than start/goal, for pocket-arc detection.
-    let mut other_gate_points: HashSet<Point> = HashSet::new();
-    for gate in gates {
-        for &p in gate {
-            if p != start && p != goal {
-                other_gate_points.insert(p);
-            }
-        }
-    }
+    // Start chokepoint is pre-visited; its direct edge is prohibited so BFS
+    // must go the long way around.
+    let mut initial_visited: HashSet<usize> = HashSet::new();
+    initial_visited.insert(start_gate_idx);
+    let all_gate_indices: HashSet<usize> = (0..gates.len()).collect();
 
-    let max_retries = gates.len() + 2;
-    let mut last_invaded_path: Option<Vec<Point>> = None;
-    let mut debug_arcs: Vec<DebugArc> = Vec::new();
-    for attempt in 0..max_retries {
-        let path = match dijkstra(&adj_graph, start, goal, Some(gates[start_gate_idx])) {
-            Some(p) => p,
-            None => break,
-        };
-        if path.len() < 3 {
+    let mut prohibited_edges: HashSet<(Point, Point)> = HashSet::new();
+    prohibited_edges.insert((start, goal));
+    prohibited_edges.insert((goal, start));
+
+    // --- Phase 1: BFS with forced gate crossing + rewind ---
+    let max_rewinds = gates.len() + 2;
+    let mut best_path: Option<Vec<Point>> = None;
+    let mut best_visited: HashSet<usize> = HashSet::new();
+
+    for rewind in 0..max_rewinds {
+        let result = bfs_forced_gates(
+            &adj_graph, start, goal, &gate_map, &initial_visited, &prohibited_edges,
+        );
+
+        let Some(bfs) = result else { break };
+        if bfs.path.len() < 3 {
             break;
         }
 
-        // --- Check 1: obstacle invasion (path encloses an obstacle) ---
-        // Only test obstacle vertices that are NOT on the traced path.
-        // Path-coincident vertices lie on the boundary and give
-        // indeterminate results with ray-casting PIP.
+        let all_visited = all_gate_indices.iter().all(|i| bfs.visited_chokes.contains(i));
+
+        // Keep the best result (most gates visited)
+        if best_path.is_none() || bfs.visited_chokes.len() > best_visited.len() {
+            best_visited = bfs.visited_chokes.clone();
+            best_path = Some(bfs.path.clone());
+        }
+
+        if all_visited {
+            break;
+        }
+
+        // Rewind: find the last gate crossing in the path and prohibit the
+        // edge after it, forcing BFS to explore the other direction next time.
+        let last_crossing = find_last_gate_crossing(&bfs.path, gates, start_gate_idx);
+        match last_crossing {
+            Some(path_idx) => {
+                let far_side = bfs.path[path_idx + 1];
+                if path_idx + 2 < bfs.path.len() {
+                    let wrong_next = bfs.path[path_idx + 2];
+                    eprintln!(
+                        "  R{}: rewind {}: prohibiting ({},{}) -> ({},{}) after gate crossing",
+                        region.id, rewind + 1,
+                        far_side.x, far_side.y, wrong_next.x, wrong_next.y,
+                    );
+                    prohibited_edges.insert((far_side, wrong_next));
+                    prohibited_edges.insert((wrong_next, far_side));
+                } else {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+
+    let Some(mut path) = best_path else {
+        eprintln!("  R{}: BFS failed to find path", region.id);
+        return BoundaryResult {
+            polygon: None,
+            invading: false,
+            debug_arcs: Vec::new(),
+        };
+    };
+
+    // --- Phase 2: invasion check + arc swap retries ---
+    let max_invasion_retries = gates.len() + 2;
+    let mut last_invaded_path: Option<Vec<Point>> = None;
+    let mut debug_arcs: Vec<DebugArc> = Vec::new();
+
+    for attempt in 0..max_invasion_retries {
         let path_set: HashSet<Point> = path.iter().copied().collect();
         let mut invaded_obstacle = None;
         for &obstacle_id in &relevant_obstacles {
@@ -782,128 +930,99 @@ fn build_gated_boundary(
             }
         }
 
-        if let Some(invaded_id) = invaded_obstacle {
-            let invaded = &contours[invaded_id - 1];
-
-            // Identify which edges the path traversed on this obstacle
-            // (the "eliminated" arc) vs the rest (the "retained" arc).
-            let mut path_edges: HashSet<(Point, Point)> = HashSet::new();
-            for i in 0..path.len() - 1 {
-                path_edges.insert((path[i], path[i + 1]));
-                path_edges.insert((path[i + 1], path[i]));
-            }
-
-            let mut eliminated_arc: Vec<Point> = Vec::new();
-            let mut retained_arc: Vec<Point> = Vec::new();
-            for i in 0..invaded.points.len() {
-                let a = invaded.points[i];
-                let b = invaded.points[(i + 1) % invaded.points.len()];
-                if path_edges.contains(&(a, b)) {
-                    if eliminated_arc.is_empty() || *eliminated_arc.last().unwrap() != a {
-                        eliminated_arc.push(a);
-                    }
-                    eliminated_arc.push(b);
-                } else {
-                    if retained_arc.is_empty() || *retained_arc.last().unwrap() != a {
-                        retained_arc.push(a);
-                    }
-                    retained_arc.push(b);
-                }
-            }
-
-            eprintln!(
-                "  R{}: invasion of O{} ({} contour pts), eliminated {} edges, retained {} edges (attempt {})",
-                region.id, invaded_id, invaded.points.len(),
-                eliminated_arc.len().saturating_sub(1),
-                retained_arc.len().saturating_sub(1),
-                attempt + 1
-            );
-            if attempt <= 1 {
-                eprintln!("    O{} contour: {:?}", invaded_id,
-                    invaded.points.iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
-                // Show full path segment near the obstacle
-                let obstacle_pts: HashSet<Point> = invaded.points.iter().copied().collect();
-                let mut near_obstacle = Vec::new();
-                for i in 0..path.len() - 1 {
-                    if obstacle_pts.contains(&path[i]) || obstacle_pts.contains(&path[i+1]) {
-                        let is_contour_edge = (0..invaded.points.len()).any(|ci| {
-                            let a = invaded.points[ci];
-                            let b = invaded.points[(ci+1) % invaded.points.len()];
-                            (path[i] == a && path[i+1] == b) || (path[i] == b && path[i+1] == a)
-                        });
-                        near_obstacle.push((
-                            (path[i].x, path[i].y),
-                            (path[i+1].x, path[i+1].y),
-                            if is_contour_edge { "contour" } else { "gate/other" },
-                        ));
-                    }
-                }
-                eprintln!("    attempt {} path near O{}: {:?}", attempt, invaded_id, near_obstacle);
-            }
-
-            debug_arcs.push(DebugArc {
-                obstacle_id: invaded_id,
-                eliminated: eliminated_arc,
-                retained: retained_arc,
-            });
-
-            // Remove ALL edges of the invaded obstacle, then re-add only
-            // the non-traversed edges (elimination by exclusion).
-            for i in 0..invaded.points.len() {
-                let p1 = invaded.points[i];
-                let p2 = invaded.points[(i + 1) % invaded.points.len()];
-                if let Some(neighbors) = adj_graph.get_mut(&p1) {
-                    neighbors.retain(|p| *p != p2);
-                }
-                if let Some(neighbors) = adj_graph.get_mut(&p2) {
-                    neighbors.retain(|p| *p != p1);
-                }
-            }
-            for i in 0..invaded.points.len() {
-                let a = invaded.points[i];
-                let b = invaded.points[(i + 1) % invaded.points.len()];
-                if !path_edges.contains(&(a, b)) {
-                    add_bidirectional_edge(&mut adj_graph, a, b);
-                }
-            }
-            last_invaded_path = Some(path);
-            continue;
-        }
-
-        // --- Check 2: pocket-arc shortcut ---
-        // For a region with multiple gates, the boundary must visit all gate
-        // points. If Dijkstra found a path that skips other gates, it took a
-        // shortcut through a pocket region's arc. Remove that arc and retry.
-        if !other_gate_points.is_empty() {
-            let visits_other = path.iter().any(|p| other_gate_points.contains(p));
-            if !visits_other {
-                let removed = remove_path_arcs_from_graph(&mut adj_graph, &path, contours, &relevant_obstacles);
-                eprintln!(
-                    "  R{}: pocket-arc shortcut (visited 0/{} other gate points), removed {} arc edges (attempt {})",
-                    region.id, other_gate_points.len(), removed, attempt + 1
-                );
-                continue;
-            }
-        }
-
-        return BoundaryResult {
-            polygon: Some(path),
-            invading: false,
-            debug_arcs,
+        let Some(invaded_id) = invaded_obstacle else {
+            // No invasion — success
+            return BoundaryResult {
+                polygon: Some(path),
+                invading: false,
+                debug_arcs,
+            };
         };
+
+        let invaded = &contours[invaded_id - 1];
+
+        // Identify traversed vs non-traversed edges on the invaded obstacle
+        let mut path_edges: HashSet<(Point, Point)> = HashSet::new();
+        for i in 0..path.len() - 1 {
+            path_edges.insert((path[i], path[i + 1]));
+            path_edges.insert((path[i + 1], path[i]));
+        }
+
+        let mut eliminated_arc: Vec<Point> = Vec::new();
+        let mut retained_arc: Vec<Point> = Vec::new();
+        for i in 0..invaded.points.len() {
+            let a = invaded.points[i];
+            let b = invaded.points[(i + 1) % invaded.points.len()];
+            if path_edges.contains(&(a, b)) {
+                if eliminated_arc.is_empty() || *eliminated_arc.last().unwrap() != a {
+                    eliminated_arc.push(a);
+                }
+                eliminated_arc.push(b);
+            } else {
+                if retained_arc.is_empty() || *retained_arc.last().unwrap() != a {
+                    retained_arc.push(a);
+                }
+                retained_arc.push(b);
+            }
+        }
+
+        eprintln!(
+            "  R{}: invasion of O{} ({} contour pts), eliminated {} edges, retained {} edges (attempt {})",
+            region.id, invaded_id, invaded.points.len(),
+            eliminated_arc.len().saturating_sub(1),
+            retained_arc.len().saturating_sub(1),
+            attempt + 1
+        );
+
+        debug_arcs.push(DebugArc {
+            obstacle_id: invaded_id,
+            eliminated: eliminated_arc,
+            retained: retained_arc,
+        });
+
+        // Swap arcs: remove all edges of the invaded obstacle, then re-add
+        // only the non-traversed edges.
+        for i in 0..invaded.points.len() {
+            let p1 = invaded.points[i];
+            let p2 = invaded.points[(i + 1) % invaded.points.len()];
+            if let Some(neighbors) = adj_graph.get_mut(&p1) {
+                neighbors.retain(|p| *p != p2);
+            }
+            if let Some(neighbors) = adj_graph.get_mut(&p2) {
+                neighbors.retain(|p| *p != p1);
+            }
+        }
+        for i in 0..invaded.points.len() {
+            let a = invaded.points[i];
+            let b = invaded.points[(i + 1) % invaded.points.len()];
+            if !path_edges.contains(&(a, b)) {
+                add_bidirectional_edge(&mut adj_graph, a, b);
+            }
+        }
+        last_invaded_path = Some(path);
+
+        // Re-run BFS on the modified graph
+        match bfs_forced_gates(
+            &adj_graph, start, goal, &gate_map, &initial_visited, &prohibited_edges,
+        ) {
+            Some(bfs) if bfs.path.len() >= 3 => {
+                path = bfs.path;
+            }
+            _ => break,
+        }
     }
 
-    // Return the last invaded path for diagnostic rendering.
-    if let Some(path) = last_invaded_path {
-        eprintln!("  R{}: invading boundary kept after {} retries", region.id, max_retries);
+    // Return the last invaded path for diagnostic rendering
+    if let Some(p) = last_invaded_path {
+        eprintln!("  R{}: invading boundary kept after retries", region.id);
         return BoundaryResult {
-            polygon: Some(path),
+            polygon: Some(p),
             invading: true,
             debug_arcs,
         };
     }
 
-    eprintln!("  R{}: boundary failed after {} retries", region.id, max_retries);
+    eprintln!("  R{}: boundary failed after retries", region.id);
     BoundaryResult {
         polygon: None,
         invading: false,
@@ -911,42 +1030,29 @@ fn build_gated_boundary(
     }
 }
 
-/// Remove contour-arc edges that the path traversed.
-/// The path took a shortcut through a pocket arc; we identify consecutive path
-/// edges that lie on an obstacle contour and remove them from the adjacency graph.
-fn remove_path_arcs_from_graph(
-    adj_graph: &mut HashMap<Point, Vec<Point>>,
+/// Find the last gate crossing in a path (excluding the start gate).
+/// Returns the path index where path[idx] → path[idx+1] is a gate edge.
+fn find_last_gate_crossing(
     path: &[Point],
-    contours: &[Contour],
-    relevant_obstacles: &HashSet<usize>,
-) -> usize {
-    // Build a set of all contour edges (both directions) for quick lookup.
-    let mut contour_edges: HashSet<(Point, Point)> = HashSet::new();
-    for &obstacle_id in relevant_obstacles {
-        let c = &contours[obstacle_id - 1];
-        for i in 0..c.points.len() {
-            let a = c.points[i];
-            let b = c.points[(i + 1) % c.points.len()];
-            contour_edges.insert((a, b));
-            contour_edges.insert((b, a));
+    gates: &[[Point; 2]],
+    start_gate_idx: usize,
+) -> Option<usize> {
+    let mut gate_edges: HashSet<(Point, Point)> = HashSet::new();
+    for (i, gate) in gates.iter().enumerate() {
+        if i == start_gate_idx {
+            continue;
         }
+        gate_edges.insert((gate[0], gate[1]));
+        gate_edges.insert((gate[1], gate[0]));
     }
 
-    let mut removed = 0;
+    let mut last = None;
     for i in 0..path.len() - 1 {
-        let a = path[i];
-        let b = path[i + 1];
-        if contour_edges.contains(&(a, b)) {
-            if let Some(neighbors) = adj_graph.get_mut(&a) {
-                neighbors.retain(|p| *p != b);
-                removed += 1;
-            }
-            if let Some(neighbors) = adj_graph.get_mut(&b) {
-                neighbors.retain(|p| *p != a);
-            }
+        if gate_edges.contains(&(path[i], path[i + 1])) {
+            last = Some(i);
         }
     }
-    removed
+    last
 }
 
 fn find_point_in_contour(c: &Contour, p: Point) -> Option<usize> {
