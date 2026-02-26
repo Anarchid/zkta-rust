@@ -81,7 +81,8 @@ pub fn build_voronoi(
         std::collections::HashSet::new();
 
     // Build segments for contour edges (skip those that lie on borders)
-    for indices in &contour_vertex_indices {
+    let mut segment_contour_id: Vec<usize> = Vec::new();
+    for (ci, indices) in contour_vertex_indices.iter().enumerate() {
         let n = indices.len();
         for j in 0..n {
             let k = (j + 1) % n;
@@ -110,6 +111,7 @@ pub fn build_voronoi(
                 continue;
             }
             segments.push([pj[0], pj[1], pk[0], pk[1]]);
+            segment_contour_id.push(ci);
         }
     }
 
@@ -133,24 +135,31 @@ pub fn build_voronoi(
                 continue;
             }
             segments.push([pa[0], pa[1], pb[0], pb[1]]);
+            segment_contour_id.push(usize::MAX); // border segment
             border_segment_count += 1;
         }
     }
     eprintln!("Added {} border sub-segments to Voronoi input", border_segment_count);
 
-    // Deduplicate segments (both orderings)
-    let mut seen_segments: std::collections::HashSet<(i32, i32, i32, i32)> =
-        std::collections::HashSet::new();
-    segments.retain(|s| {
-        let fwd = (s[0], s[1], s[2], s[3]);
-        let rev = (s[2], s[3], s[0], s[1]);
-        if seen_segments.contains(&fwd) || seen_segments.contains(&rev) {
-            false
-        } else {
-            seen_segments.insert(fwd);
-            true
+    // Deduplicate segments (both orderings), keeping contour IDs in sync
+    {
+        let mut seen: std::collections::HashSet<(i32, i32, i32, i32)> =
+            std::collections::HashSet::new();
+        let mut keep = Vec::with_capacity(segments.len());
+        for i in 0..segments.len() {
+            let s = segments[i];
+            let fwd = (s[0], s[1], s[2], s[3]);
+            let rev = (s[2], s[3], s[0], s[1]);
+            if !seen.contains(&fwd) && !seen.contains(&rev) {
+                seen.insert(fwd);
+                keep.push(i);
+            }
         }
-    });
+        let new_segments: Vec<[i32; 4]> = keep.iter().map(|&i| segments[i]).collect();
+        let new_ids: Vec<usize> = keep.iter().map(|&i| segment_contour_id[i]).collect();
+        segments = new_segments;
+        segment_contour_id = new_ids;
+    }
 
     // Remove points that lie on segments (boostvoronoi constraint)
     let point_on_segment = |px: i32, py: i32, s: &[i32; 4]| -> bool {
@@ -226,9 +235,13 @@ pub fn build_voronoi(
             let b2 = geometry::Point::new(s2[2], s2[3]);
             if geometry::segments_intersect(a1, a2, b1, b2) {
                 if intersection_count < 5 {
+                    let c1 = segment_contour_id[i];
+                    let c2 = segment_contour_id[j];
+                    let label = |c: usize| if c == usize::MAX { "border".to_string() } else { format!("C{}", c) };
                     eprintln!(
-                        "  WARNING: intersecting segments: [{},{}]-[{},{}] x [{},{}]-[{},{}]",
-                        s1[0], s1[1], s1[2], s1[3], s2[0], s2[1], s2[2], s2[3]
+                        "  WARNING: intersecting segments: [{},{}]-[{},{}] ({}) x [{},{}]-[{},{}] ({})",
+                        s1[0], s1[1], s1[2], s1[3], label(c1),
+                        s2[0], s2[1], s2[2], s2[3], label(c2),
                     );
                 }
                 intersection_count += 1;

@@ -350,6 +350,242 @@ pub fn simplify_holes(holes: &[LabeledContour], tolerance: f64) -> Vec<Contour> 
     result
 }
 
+/// Fix simplified contours that became non-manifold after Douglas-Peucker:
+///
+/// 1. **Self-intersecting contours** (bowtie shapes): split at the intersection
+///    point into two separate contours.  Each part is kept if it passes the size
+///    filter (>3 pts, area >100).
+///
+/// 2. **Hole protrusion**: hole edges that cross their parent obstacle boundary.
+///    The intersection point is inserted into the hole contour.
+///
+/// Returns the updated outer_count (splitting may add/remove outer contours).
+pub fn make_contours_manifold(
+    simplified_contours: &mut Vec<Contour>,
+    outer_count: usize,
+) -> usize {
+    use crate::geometry::{closest_point_on_segment, point_in_polygon, segments_intersect};
+
+    // Phase 1: Split self-intersecting contours
+    let mut new_outers: Vec<Contour> = Vec::new();
+    let mut new_holes: Vec<Contour> = Vec::new();
+    let mut splits = 0usize;
+
+    for (ci, contour) in simplified_contours.iter().enumerate() {
+        let parts = split_self_intersections(contour);
+        let is_hole = ci >= outer_count;
+        if parts.len() > 1 {
+            splits += parts.len() - 1;
+            eprintln!(
+                "  Split self-intersecting C{} ({}) into {} parts",
+                ci,
+                if is_hole { "hole" } else { "outer" },
+                parts.len()
+            );
+        }
+        for part in parts {
+            if part.len() > 3 && part.area() > 100.0 {
+                if is_hole {
+                    new_holes.push(part);
+                } else {
+                    new_outers.push(part);
+                }
+            }
+        }
+    }
+
+    let new_outer_count = new_outers.len();
+    simplified_contours.clear();
+    simplified_contours.extend(new_outers);
+    simplified_contours.extend(new_holes);
+
+    if splits > 0 {
+        eprintln!(
+            "Made manifold: {} splits, {} outer + {} holes",
+            splits, new_outer_count,
+            simplified_contours.len() - new_outer_count
+        );
+    }
+
+    // Phase 2: Clip holes to parent obstacle boundaries
+    let mut total_snapped = 0usize;
+    let mut total_inserted = 0usize;
+
+    for hi in new_outer_count..simplified_contours.len() {
+        let hole_points = &simplified_contours[hi].points;
+        if hole_points.is_empty() {
+            continue;
+        }
+
+        // Find parent: which outer contour contains this hole's centroid?
+        let cx = hole_points.iter().map(|p| p.x as f64).sum::<f64>()
+            / hole_points.len() as f64;
+        let cy = hole_points.iter().map(|p| p.y as f64).sum::<f64>()
+            / hole_points.len() as f64;
+        let centroid = Point::new(cx.round() as i32, cy.round() as i32);
+
+        // Find the smallest enclosing outer contour (not just the first)
+        let mut parent_idx = None;
+        let mut parent_area = f64::MAX;
+        for oi in 0..new_outer_count {
+            if point_in_polygon(centroid, &simplified_contours[oi].points) {
+                let area = simplified_contours[oi].area();
+                if area < parent_area {
+                    parent_area = area;
+                    parent_idx = Some(oi);
+                }
+            }
+        }
+
+        let Some(pi) = parent_idx else { continue };
+
+        let parent = simplified_contours[pi].points.clone();
+
+        // Snap protruding vertices
+        let hole = &mut simplified_contours[hi].points;
+        for p in hole.iter_mut() {
+            if !point_in_polygon(*p, &parent) {
+                let mut min_dist = f64::MAX;
+                let mut nearest = *p;
+                for j in 0..parent.len() {
+                    let a = parent[j];
+                    let b = parent[(j + 1) % parent.len()];
+                    let cp = closest_point_on_segment(*p, a, b);
+                    let d = p.dist(&cp);
+                    if d < min_dist {
+                        min_dist = d;
+                        nearest = cp;
+                    }
+                }
+                *p = nearest;
+                total_snapped += 1;
+            }
+        }
+
+        // Insert intersection points where hole edges cross parent edges
+        let mut insertions: Vec<(usize, Point)> = Vec::new();
+        let hole = &simplified_contours[hi].points;
+        let hn = hole.len();
+        for i in 0..hn {
+            let h1 = hole[i];
+            let h2 = hole[(i + 1) % hn];
+            for j in 0..parent.len() {
+                let p1 = parent[j];
+                let p2 = parent[(j + 1) % parent.len()];
+                if h1 == p1 || h1 == p2 || h2 == p1 || h2 == p2 {
+                    continue;
+                }
+                if segments_intersect(h1, h2, p1, p2) {
+                    if let Some(ix) = segment_intersection_point(h1, h2, p1, p2) {
+                        insertions.push((i, ix));
+                    }
+                }
+            }
+        }
+
+        insertions.sort_by_key(|(idx, _)| std::cmp::Reverse(*idx));
+        insertions.dedup_by_key(|(idx, _)| *idx);
+        let hole = &mut simplified_contours[hi].points;
+        for (after_idx, point) in &insertions {
+            hole.insert(after_idx + 1, *point);
+            total_inserted += 1;
+        }
+    }
+
+    if total_snapped > 0 || total_inserted > 0 {
+        eprintln!(
+            "Clipped holes: {} vertices snapped, {} intersection points inserted",
+            total_snapped, total_inserted
+        );
+    }
+
+    new_outer_count
+}
+
+/// Split a self-intersecting contour into non-intersecting parts.
+fn split_self_intersections(contour: &Contour) -> Vec<Contour> {
+    use crate::geometry::segments_intersect;
+
+    let pts = &contour.points;
+    let n = pts.len();
+    if n < 4 {
+        return vec![contour.clone()];
+    }
+
+    // Find first self-intersection
+    for i in 0..n {
+        let i_next = (i + 1) % n;
+        for j in (i + 2)..n {
+            let j_next = (j + 1) % n;
+            // Skip adjacent edges (including wrap-around)
+            if j_next == i {
+                continue;
+            }
+
+            let a1 = pts[i];
+            let a2 = pts[i_next];
+            let b1 = pts[j];
+            let b2 = pts[j_next];
+
+            if a1 == b1 || a1 == b2 || a2 == b1 || a2 == b2 {
+                continue;
+            }
+
+            if segments_intersect(a1, a2, b1, b2) {
+                if let Some(ix) = segment_intersection_point(a1, a2, b1, b2) {
+                    // Split into two loops at the intersection point
+                    // Loop 1: ix → i+1 → ... → j → ix
+                    let mut loop1 = vec![ix];
+                    let mut k = i_next;
+                    loop {
+                        loop1.push(pts[k]);
+                        if k == j {
+                            break;
+                        }
+                        k = (k + 1) % n;
+                    }
+
+                    // Loop 2: ix → j+1 → ... → i → ix
+                    let mut loop2 = vec![ix];
+                    let mut k = j_next;
+                    loop {
+                        loop2.push(pts[k]);
+                        if k == i {
+                            break;
+                        }
+                        k = (k + 1) % n;
+                    }
+
+                    // Recurse on each loop (they might still self-intersect)
+                    let c1 = Contour::from_points(loop1);
+                    let c2 = Contour::from_points(loop2);
+                    let mut result = split_self_intersections(&c1);
+                    result.extend(split_self_intersections(&c2));
+                    return result;
+                }
+            }
+        }
+    }
+
+    vec![contour.clone()]
+}
+
+/// Compute the intersection point of two line segments.
+fn segment_intersection_point(a1: Point, a2: Point, b1: Point, b2: Point) -> Option<Point> {
+    let d1x = (a2.x - a1.x) as f64;
+    let d1y = (a2.y - a1.y) as f64;
+    let d2x = (b2.x - b1.x) as f64;
+    let d2y = (b2.y - b1.y) as f64;
+    let denom = d1x * d2y - d1y * d2x;
+    if denom.abs() < 1e-10 {
+        return None; // parallel
+    }
+    let t = ((b1.x - a1.x) as f64 * d2y - (b1.y - a1.y) as f64 * d2x) / denom;
+    let ix = a1.x as f64 + t * d1x;
+    let iy = a1.y as f64 + t * d1y;
+    Some(Point::new(ix.round() as i32, iy.round() as i32))
+}
+
 /// Seal dropped holes in the label_map.
 ///
 /// Holes that don't survive simplification still have their interior marked as

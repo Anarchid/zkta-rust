@@ -94,7 +94,11 @@ fn analyze_inner(
     eprintln!("  [2/13] Simplified to {} contours ({} outer + {} holes, {} points)",
         simplified_contours.len(), outer_count, hole_count, simp_pts);
 
-    // Stage 2b: Seal dropped holes — overwrite -1 pixels from holes that didn't
+    // Stage 2b: Fix non-manifold contours from Douglas-Peucker simplification:
+    // split self-intersecting (bowtie) contours and clip holes to parent boundaries.
+    let outer_count = contour::make_contours_manifold(&mut simplified_contours, outer_count);
+
+    // Stage 2c: Seal dropped holes — overwrite -1 pixels from holes that didn't
     // survive simplification so graph builder rejects those areas as obstacle.
     contour::seal_dropped_holes(&holes, 8.0, &mut label_map, width, height);
 
