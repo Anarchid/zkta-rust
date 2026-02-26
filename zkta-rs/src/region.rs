@@ -716,106 +716,24 @@ fn bfs_forced_gates(
     None
 }
 
-fn build_gated_boundary(
-    region: &Region,
+/// Build the boundary adjacency graph from full obstacle contours, gate edges,
+/// and map boundary edges.  Both arcs of every obstacle are included; the
+/// invasion checker corrects wrong-direction arcs afterward.
+fn build_boundary_graph(
     gates: &[[Point; 2]],
-    gate_obstacle_ids: &[[usize; 2]],
     contours: &[Contour],
+    relevant_obstacles: &HashSet<usize>,
     width: i32,
     height: i32,
-) -> BoundaryResult {
-    let center = region.center;
-
-    // Collect relevant obstacles
-    let mut relevant_obstacles: HashSet<usize> = HashSet::new();
-    for ids in gate_obstacle_ids {
-        for &id in ids {
-            if id > 0 && id <= contours.len() {
-                relevant_obstacles.insert(id);
-            }
-        }
-    }
-
+) -> HashMap<Point, Vec<Point>> {
     let mut adj_graph: HashMap<Point, Vec<Point>> = HashMap::new();
 
-    // 1. For each obstacle, add region-facing arcs
-    for &obstacle_id in &relevant_obstacles {
+    // 1. Add full contour edges for each relevant obstacle
+    for &obstacle_id in relevant_obstacles {
         let c = &contours[obstacle_id - 1];
-
-        // Find gate points on this obstacle
-        let mut gate_indices: Vec<usize> = Vec::new();
-        for (g, ids) in gate_obstacle_ids.iter().enumerate() {
-            for side in 0..2 {
-                if ids[side] == obstacle_id {
-                    if let Some(idx) = find_point_in_contour(c, gates[g][side]) {
-                        if !gate_indices.contains(&idx) {
-                            gate_indices.push(idx);
-                        }
-                    }
-                }
-            }
-        }
-
-        if gate_indices.len() < 2 {
-            if gate_indices.len() == 1 {
-                // 1 gate point: add only the region-facing arc.
-                let gi = gate_indices[0];
-                let n = c.points.len();
-                let next_fwd = (gi + 1) % n;
-                let next_rev = (gi + n - 1) % n;
-                let d_fwd = c.points[next_fwd].dist_sq(&center);
-                let d_rev = c.points[next_rev].dist_sq(&center);
-                let opposite = (gi + n / 2) % n;
-                let chosen = if d_fwd < d_rev {
-                    extract_arc(c, gi, opposite)
-                } else {
-                    extract_arc(c, opposite, gi)
-                };
-                for j in 0..chosen.len() - 1 {
-                    add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
-                }
-            } else {
-                // 0 gate points: break contour at farthest vertex from center
-                let mut farthest_idx = 0;
-                let mut max_dist = 0.0f64;
-                for (i, p) in c.points.iter().enumerate() {
-                    let d = p.dist_sq(&center);
-                    if d > max_dist {
-                        max_dist = d;
-                        farthest_idx = i;
-                    }
-                }
-                let break_next = (farthest_idx + 1) % c.points.len();
-                for i in 0..c.points.len() {
-                    let next = (i + 1) % c.points.len();
-                    if i == farthest_idx && next == break_next {
-                        continue;
-                    }
-                    add_bidirectional_edge(&mut adj_graph, c.points[i], c.points[next]);
-                }
-            }
-            continue;
-        }
-
-        gate_indices.sort();
-
-        // For each consecutive pair of gate points, pick region-facing arc
-        for i in 0..gate_indices.len() {
-            let idx_a = gate_indices[i];
-            let idx_b = gate_indices[(i + 1) % gate_indices.len()];
-
-            let arc_fwd = extract_arc(c, idx_a, idx_b);
-            let arc_rev = extract_arc(c, idx_b, idx_a);
-
-            let centroid_fwd = arc_centroid(&arc_fwd);
-            let centroid_rev = arc_centroid(&arc_rev);
-            let d_fwd = centroid_fwd.dist(&center);
-            let d_rev = centroid_rev.dist(&center);
-
-            let chosen = if d_fwd < d_rev { &arc_fwd } else { &arc_rev };
-            for j in 0..chosen.len() - 1 {
-                add_bidirectional_edge(&mut adj_graph, chosen[j], chosen[j + 1]);
-            }
+        for i in 0..c.points.len() {
+            let next = (i + 1) % c.points.len();
+            add_bidirectional_edge(&mut adj_graph, c.points[i], c.points[next]);
         }
     }
 
@@ -826,6 +744,31 @@ fn build_gated_boundary(
 
     // 3. Add map boundary edges
     add_map_boundary_edges(&mut adj_graph, width, height);
+
+    adj_graph
+}
+
+fn build_gated_boundary(
+    region: &Region,
+    gates: &[[Point; 2]],
+    gate_obstacle_ids: &[[usize; 2]],
+    contours: &[Contour],
+    width: i32,
+    height: i32,
+) -> BoundaryResult {
+    // Collect relevant obstacles
+    let mut relevant_obstacles: HashSet<usize> = HashSet::new();
+    for ids in gate_obstacle_ids {
+        for &id in ids {
+            if id > 0 && id <= contours.len() {
+                relevant_obstacles.insert(id);
+            }
+        }
+    }
+
+    let mut adj_graph = build_boundary_graph(
+        gates, contours, &relevant_obstacles, width, height,
+    );
 
     // Build gate lookup: each gate point → [(partner, gate_index), ...]
     let mut gate_map: HashMap<Point, Vec<(Point, usize)>> = HashMap::new();
@@ -1053,49 +996,6 @@ fn find_last_gate_crossing(
         }
     }
     last
-}
-
-fn find_point_in_contour(c: &Contour, p: Point) -> Option<usize> {
-    // Exact match first
-    if let Some(idx) = c.points.iter().position(|&cp| cp == p) {
-        return Some(idx);
-    }
-    // Nearest within tolerance
-    let mut min_dist = f64::MAX;
-    let mut best = None;
-    for (i, cp) in c.points.iter().enumerate() {
-        let d = cp.dist(&p);
-        if d < min_dist {
-            min_dist = d;
-            best = Some(i);
-        }
-    }
-    if min_dist < 3.0 {
-        best
-    } else {
-        None
-    }
-}
-
-fn arc_centroid(arc: &[Point]) -> Point {
-    let n = arc.len() as f64;
-    let cx = arc.iter().map(|p| p.x as f64).sum::<f64>() / n;
-    let cy = arc.iter().map(|p| p.y as f64).sum::<f64>() / n;
-    Point::new(cx.round() as i32, cy.round() as i32)
-}
-
-fn extract_arc(c: &Contour, from: usize, to: usize) -> Vec<Point> {
-    let n = c.points.len();
-    let mut arc = Vec::new();
-    let mut i = from;
-    loop {
-        arc.push(c.points[i]);
-        if i == to {
-            break;
-        }
-        i = (i + 1) % n;
-    }
-    arc
 }
 
 fn is_on_map_edge(p: Point, width: i32, height: i32) -> bool {
