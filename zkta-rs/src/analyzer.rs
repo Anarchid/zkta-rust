@@ -85,9 +85,9 @@ fn analyze_inner(
     renderer.on_contours_traced(&full_contours, &holes, &label_map, width, height);
 
     // Stage 2: Simplify contours (outer boundaries + hole inner boundaries)
-    let mut simplified_contours = contour::simplify_contours(&full_contours, 8.0);
+    let mut simplified_contours = contour::simplify_contours(&full_contours, 8.0, width, height);
     let outer_count = simplified_contours.len();
-    let simplified_holes = contour::simplify_holes(&holes, 8.0);
+    let simplified_holes = contour::simplify_holes(&holes, 8.0, width, height);
     let hole_count = simplified_holes.len();
     simplified_contours.extend(simplified_holes);
     let simp_pts: usize = simplified_contours.iter().map(|c| c.len()).sum();

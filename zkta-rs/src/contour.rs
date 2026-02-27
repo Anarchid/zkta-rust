@@ -340,12 +340,17 @@ fn flood_fill_hole(
 
 /// Simplify hole contours (inner boundaries of obstacles) using Douglas-Peucker.
 /// Same filtering as simplify_contours: >= 4 points and area >= 100.
-pub fn simplify_holes(holes: &[LabeledContour], tolerance: f64) -> Vec<Contour> {
+pub fn simplify_holes(
+    holes: &[LabeledContour],
+    tolerance: f64,
+    width: u32,
+    height: u32,
+) -> Vec<Contour> {
     let as_contours: Vec<Contour> = holes
         .iter()
         .map(|h| Contour::from_points(h.points.clone()))
         .collect();
-    let result = simplify_contours_inner(&as_contours, tolerance, false);
+    let result = simplify_contours_inner(&as_contours, tolerance, false, width, height);
     eprintln!("Simplified {} holes to {} hole contours", holes.len(), result.len());
     result
 }
@@ -728,16 +733,31 @@ pub fn clear_dropped_obstacles(
     );
 }
 
-/// Simplify contours using Douglas-Peucker algorithm.
+/// Simplify contours using Douglas-Peucker algorithm, pinning bounding-box
+/// extreme vertices and wall-contact extreme vertices so they survive.
 /// Returns only contours with >= 3 points and area >= 100.
-pub fn simplify_contours(contours: &[Contour], tolerance: f64) -> Vec<Contour> {
-    simplify_contours_inner(contours, tolerance, true)
+pub fn simplify_contours(
+    contours: &[Contour],
+    tolerance: f64,
+    width: u32,
+    height: u32,
+) -> Vec<Contour> {
+    simplify_contours_inner(contours, tolerance, true, width, height)
 }
 
-fn simplify_contours_inner(contours: &[Contour], tolerance: f64, rescue_thin: bool) -> Vec<Contour> {
+fn simplify_contours_inner(
+    contours: &[Contour],
+    tolerance: f64,
+    rescue_thin: bool,
+    width: u32,
+    height: u32,
+) -> Vec<Contour> {
+    let w = width as i32;
+    let h = height as i32;
     let mut result = Vec::new();
     for c in contours {
-        let contour = simplify_one(c, tolerance);
+        let pinned = find_pinned_vertices(c, w, h);
+        let contour = simplify_one_pinned(c, tolerance, &pinned);
         if contour.len() >= 3 && contour.area() > 100.0 {
             result.push(contour);
             continue;
@@ -748,7 +768,7 @@ fn simplify_contours_inner(contours: &[Contour], tolerance: f64, rescue_thin: bo
         if rescue_thin && c.area() > 100.0 {
             let mut tol = tolerance / 2.0;
             while tol >= 1.0 {
-                let retry = simplify_one(c, tol);
+                let retry = simplify_one_pinned(c, tol, &pinned);
                 if retry.len() >= 3 {
                     result.push(retry);
                     break;
@@ -777,4 +797,137 @@ fn simplify_one(c: &Contour, tolerance: f64) -> Contour {
         pts.pop();
     }
     Contour::from_points(pts)
+}
+
+/// Identify vertex indices that must survive simplification.
+///
+/// Two tiers:
+/// 1. **Bounding-box extremes** (all contours): vertices at min_x, max_x,
+///    min_y, max_y of the original contour — one per extreme.
+/// 2. **Wall-contact extremes** (wall-hugging contours): for each map border
+///    the contour touches, the two vertices with the most extreme position
+///    along that border (e.g. leftmost and rightmost on the north wall).
+fn find_pinned_vertices(contour: &Contour, width: i32, height: i32) -> Vec<usize> {
+    use std::collections::BTreeSet;
+
+    let pts = &contour.points;
+    if pts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut pinned = BTreeSet::new();
+
+    // --- Tier 2: bounding-box extremes (one vertex per extreme) -----------
+    let bounds = contour.bounds().unwrap(); // [min_x, max_x, min_y, max_y]
+    for (i, p) in pts.iter().enumerate() {
+        if p.x == bounds[0] || p.x == bounds[1] || p.y == bounds[2] || p.y == bounds[3] {
+            pinned.insert(i);
+        }
+    }
+
+    // --- Tier 1: wall-contact extremes ------------------------------------
+    let wall_tolerance = 2;
+    let borders: [(Box<dyn Fn(&Point) -> bool>, Box<dyn Fn(&Point) -> i32>); 4] = [
+        // North wall (y near 0): extremes along x
+        (Box::new(|p: &Point| p.y <= wall_tolerance),
+         Box::new(|p: &Point| p.x)),
+        // South wall (y near height-1): extremes along x
+        (Box::new(move |p: &Point| p.y >= height - 1 - wall_tolerance),
+         Box::new(|p: &Point| p.x)),
+        // West wall (x near 0): extremes along y
+        (Box::new(|p: &Point| p.x <= wall_tolerance),
+         Box::new(|p: &Point| p.y)),
+        // East wall (x near width-1): extremes along y
+        (Box::new(move |p: &Point| p.x >= width - 1 - wall_tolerance),
+         Box::new(|p: &Point| p.y)),
+    ];
+
+    for (on_wall, axis_val) in &borders {
+        let wall_verts: Vec<usize> = (0..pts.len())
+            .filter(|&i| on_wall(&pts[i]))
+            .collect();
+        if wall_verts.len() >= 2 {
+            let min_idx = *wall_verts.iter().min_by_key(|&&i| axis_val(&pts[i])).unwrap();
+            let max_idx = *wall_verts.iter().max_by_key(|&&i| axis_val(&pts[i])).unwrap();
+            pinned.insert(min_idx);
+            pinned.insert(max_idx);
+        }
+    }
+
+    pinned.into_iter().collect()
+}
+
+/// Simplify a closed contour while preserving pinned vertices.
+///
+/// Cuts the polygon into open sub-segments at pinned vertices, simplifies
+/// each sub-segment independently (D-P always retains endpoints), then
+/// welds the simplified sub-segments back into a single closed polygon.
+fn simplify_one_pinned(c: &Contour, tolerance: f64, pinned: &[usize]) -> Contour {
+    if pinned.is_empty() {
+        return simplify_one(c, tolerance);
+    }
+
+    let n = c.points.len();
+
+    // With only one pinned vertex, open the polygon there and simplify as
+    // a single open polyline (D-P keeps both endpoints).
+    if pinned.len() == 1 {
+        let p = pinned[0];
+        let mut open: Vec<Coord<f64>> = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let pt = c.points[(p + i) % n];
+            open.push(Coord { x: pt.x as f64, y: pt.y as f64 });
+        }
+        let simplified = LineString::new(open).simplify(&tolerance);
+        let mut pts: Vec<Point> = simplified.0.iter()
+            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
+            .collect();
+        // Remove closing duplicate
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        return Contour::from_points(pts);
+    }
+
+    // Multiple pinned vertices: cut, simplify each sub-segment, weld.
+    let mut result_points: Vec<Point> = Vec::new();
+
+    for seg_i in 0..pinned.len() {
+        let start = pinned[seg_i];
+        let end = pinned[(seg_i + 1) % pinned.len()];
+
+        // Extract sub-segment walking forward from start to end (wrapping).
+        let mut segment: Vec<Coord<f64>> = Vec::new();
+        let mut idx = start;
+        loop {
+            let pt = c.points[idx];
+            segment.push(Coord { x: pt.x as f64, y: pt.y as f64 });
+            if idx == end { break; }
+            idx = (idx + 1) % n;
+        }
+
+        if segment.len() <= 2 {
+            // 2 points or fewer: keep as-is (nothing to simplify).
+            // Add all except last (it's the start of the next sub-segment).
+            for coord in &segment[..segment.len() - 1] {
+                result_points.push(Point::new(coord.x.round() as i32, coord.y.round() as i32));
+            }
+        } else {
+            let simplified = LineString::new(segment).simplify(&tolerance);
+            let pts: Vec<Point> = simplified.0.iter()
+                .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
+                .collect();
+            // Add all except last (it's the start of the next sub-segment).
+            for p in &pts[..pts.len() - 1] {
+                result_points.push(*p);
+            }
+        }
+    }
+
+    // Remove closing duplicate if present
+    if result_points.len() > 1 && result_points.first() == result_points.last() {
+        result_points.pop();
+    }
+
+    Contour::from_points(result_points)
 }
