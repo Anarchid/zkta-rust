@@ -487,13 +487,21 @@ fn is_on_map_edge_approx(p: geometry::Point, width: i32, height: i32) -> bool {
 /// Save analysis results for a single tier.
 fn save_tier_results(result: &AnalysisResult, tier_name: &str, output_dir: &str) {
     let dir = format!("{}/{}", output_dir, tier_name);
+
     render_final_result(result, &format!("{}/08_final.png", dir));
     export_to_json(result, &format!("{}/result.json", dir));
 
     // Dump debug boundary graphs for failing/invading regions
-    for r in &result.regions {
-        if let Some(ref db) = r.debug_boundary {
-            dump_debug_boundary(r, db, result, &dir);
+    let errors_dir = format!("{}/errors", dir);
+    // Clear stale debug files from previous runs (region IDs are unstable)
+    let _ = fs::remove_dir_all(&errors_dir);
+    let has_errors = result.regions.iter().any(|r| r.debug_boundary.is_some());
+    if has_errors {
+        let _ = fs::create_dir_all(&errors_dir);
+        for r in &result.regions {
+            if let Some(ref db) = r.debug_boundary {
+                dump_debug_boundary(r, db, result, &errors_dir);
+            }
         }
     }
 }
