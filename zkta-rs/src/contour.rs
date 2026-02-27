@@ -819,9 +819,15 @@ fn find_pinned_vertices(contour: &Contour, width: i32, height: i32) -> Vec<usize
 
     // --- Tier 2: bounding-box extremes (one vertex per extreme) -----------
     let bounds = contour.bounds().unwrap(); // [min_x, max_x, min_y, max_y]
-    for (i, p) in pts.iter().enumerate() {
-        if p.x == bounds[0] || p.x == bounds[1] || p.y == bounds[2] || p.y == bounds[3] {
-            pinned.insert(i);
+    let extremes: [Box<dyn Fn(&Point) -> bool>; 4] = [
+        Box::new(move |p: &Point| p.x == bounds[0]),  // leftmost
+        Box::new(move |p: &Point| p.x == bounds[1]),  // rightmost
+        Box::new(move |p: &Point| p.y == bounds[2]),  // topmost
+        Box::new(move |p: &Point| p.y == bounds[3]),  // bottommost
+    ];
+    for test in &extremes {
+        if let Some(idx) = pts.iter().position(|p| test(p)) {
+            pinned.insert(idx);
         }
     }
 
