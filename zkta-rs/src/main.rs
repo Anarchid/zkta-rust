@@ -359,11 +359,143 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
     [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
 }
 
+/// Dump JSON + PNG debug output for a failing region's boundary adjacency graph.
+fn dump_debug_boundary(
+    region: &zkta::region::Region,
+    db: &zkta::region::DebugBoundary,
+    result: &AnalysisResult,
+    dir: &str,
+) {
+    let rid = region.id;
+    let (w, h) = (result.width, result.height);
+
+    // --- JSON ---
+    let gate_set: std::collections::HashSet<(geometry::Point, geometry::Point)> = db.gates.iter()
+        .flat_map(|(g, _)| vec![(g[0], g[1]), (g[1], g[0])])
+        .collect();
+
+    let json_edges: Vec<serde_json::Value> = db.edges.iter().map(|&(a, b)| {
+        let edge_type = if gate_set.contains(&(a, b)) {
+            "gate"
+        } else {
+            "contour_or_border"
+        };
+        serde_json::json!({
+            "from": [a.x, a.y],
+            "to": [b.x, b.y],
+            "type": edge_type,
+        })
+    }).collect();
+
+    let json_gates: Vec<serde_json::Value> = db.gates.iter().map(|(g, oids)| {
+        serde_json::json!({
+            "crossing": [[g[0].x, g[0].y], [g[1].x, g[1].y]],
+            "obstacles": [oids[0], oids[1]],
+        })
+    }).collect();
+
+    let node_count = {
+        let mut nodes = std::collections::HashSet::new();
+        for &(a, b) in &db.edges {
+            nodes.insert(a);
+            nodes.insert(b);
+        }
+        nodes.len()
+    };
+
+    let json = serde_json::json!({
+        "region_id": rid,
+        "center": [region.center.x, region.center.y],
+        "radius": region.radius,
+        "failure": db.failure,
+        "start": [db.start.x, db.start.y],
+        "goal": [db.goal.x, db.goal.y],
+        "relevant_obstacles": db.relevant_obstacles,
+        "gates": json_gates,
+        "edges": json_edges,
+        "edge_count": db.edges.len(),
+        "node_count": node_count,
+    });
+
+    let json_path = format!("{}/debug_R{}.json", dir, rid);
+    match fs::write(&json_path, serde_json::to_string_pretty(&json).unwrap()) {
+        Ok(()) => eprintln!("Saved {}", json_path),
+        Err(e) => eprintln!("Failed to save {}: {}", json_path, e),
+    }
+
+    // --- PNG ---
+    let mut img = image::RgbImage::new(w, h);
+
+    // Background: obstacle label_map in dark gray
+    for y in 0..h {
+        for x in 0..w {
+            if result.label_map[y as usize][x as usize] > 0 {
+                img.put_pixel(x, y, image::Rgb([50, 50, 50]));
+            }
+        }
+    }
+
+    // Classify edges for coloring
+    for &(a, b) in &db.edges {
+        let color = if gate_set.contains(&(a, b)) {
+            [255, 0, 0]       // gates: red
+        } else if is_on_map_edge_approx(a, w as i32, h as i32)
+               && is_on_map_edge_approx(b, w as i32, h as i32) {
+            [0, 200, 255]     // map border edges: cyan
+        } else {
+            [255, 255, 0]     // contour edges: yellow
+        };
+        render::draw_line(&mut img, a, b, color);
+    }
+
+    // Gate endpoints: filled circles
+    for (g, oids) in &db.gates {
+        render::draw_filled_circle(&mut img, g[0], 3, [255, 100, 100]);
+        render::draw_filled_circle(&mut img, g[1], 3, [255, 100, 100]);
+        let label = format!("O{}<>O{}", oids[0], oids[1]);
+        let mid = geometry::Point::new((g[0].x + g[1].x) / 2, (g[0].y + g[1].y) / 2);
+        render::draw_label(&mut img, mid, &label, [255, 180, 180]);
+    }
+
+    // Start: green, Goal: magenta
+    render::draw_filled_circle(&mut img, db.start, 5, [0, 255, 0]);
+    render::draw_label(&mut img, db.start, "START", [0, 255, 0]);
+    render::draw_filled_circle(&mut img, db.goal, 5, [255, 0, 255]);
+    render::draw_label(&mut img, db.goal, "GOAL", [255, 0, 255]);
+
+    // Region center
+    render::draw_filled_circle(&mut img, region.center, 4, [64, 224, 208]);
+    let rlabel = format!("R{}", rid);
+    render::draw_label(&mut img, region.center, &rlabel, [64, 224, 208]);
+
+    // Failure type label
+    let fail_label = format!("{} failure", db.failure);
+    render::draw_label(&mut img, geometry::Point::new(5, 5), &fail_label, [255, 255, 255]);
+
+    let png_path = format!("{}/debug_R{}.png", dir, rid);
+    match img.save(&png_path) {
+        Ok(()) => eprintln!("Saved {}", png_path),
+        Err(e) => eprintln!("Failed to save {}: {}", png_path, e),
+    }
+}
+
+/// Approximate map-edge test for debug rendering (classifying border edges).
+fn is_on_map_edge_approx(p: geometry::Point, width: i32, height: i32) -> bool {
+    p.x <= 2 || p.x >= width - 3 || p.y <= 2 || p.y >= height - 3
+}
+
 /// Save analysis results for a single tier.
 fn save_tier_results(result: &AnalysisResult, tier_name: &str, output_dir: &str) {
     let dir = format!("{}/{}", output_dir, tier_name);
     render_final_result(result, &format!("{}/08_final.png", dir));
     export_to_json(result, &format!("{}/result.json", dir));
+
+    // Dump debug boundary graphs for failing/invading regions
+    for r in &result.regions {
+        if let Some(ref db) = r.debug_boundary {
+            dump_debug_boundary(r, db, result, &dir);
+        }
+    }
 }
 
 // ---- CLI helpers ----

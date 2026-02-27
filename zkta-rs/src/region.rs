@@ -23,6 +23,24 @@ pub struct Region {
     /// Diagnostic: eliminated arcs (invaded) and retained arcs per obstacle.
     pub debug_arcs: Vec<DebugArc>,
     pub chokepoint_node_ids: HashSet<usize>,
+    /// Diagnostic: boundary adjacency graph for failed regions.
+    pub debug_boundary: Option<DebugBoundary>,
+}
+
+/// Diagnostic snapshot of the boundary adjacency graph for a failed region.
+#[derive(Debug, Clone)]
+pub struct DebugBoundary {
+    /// Deduplicated edge list (a→b only, no reverse).
+    pub edges: Vec<(Point, Point)>,
+    /// Gate edges: crossing points + obstacle IDs per gate.
+    pub gates: Vec<([Point; 2], [usize; 2])>,
+    /// Obstacle IDs whose contour edges are in the graph.
+    pub relevant_obstacles: Vec<usize>,
+    /// BFS start and goal points.
+    pub start: Point,
+    pub goal: Point,
+    /// "bfs" or "invasion".
+    pub failure: String,
 }
 
 /// Diagnostic info about arc selection on an obstacle.
@@ -134,6 +152,7 @@ fn find_or_create_region(
         invading: false,
         debug_arcs: Vec::new(),
         chokepoint_node_ids: HashSet::new(),
+        debug_boundary: None,
     });
     node_to_region.insert(node_id, idx);
     idx
@@ -345,13 +364,18 @@ fn crosses_chokepoint_gate(from: Point, to: Point, chokepoints: &[Chokepoint]) -
     false
 }
 
-/// Split contours at gate points.
+/// Split contours at gate points.  When a gate crossing point is very
+/// close to an existing contour vertex, snap the crossing to that vertex
+/// instead of inserting a near-duplicate (which causes false invasion
+/// detections via integer rounding in point_in_polygon).
 pub fn split_contours_at_gate_points(
     contours: &mut [Contour],
-    chokepoints: &[Chokepoint],
+    chokepoints: &mut [Chokepoint],
 ) {
-    for cp in chokepoints {
-        let Some(crossing) = cp.crossing_points else {
+    const SNAP_RADIUS: f64 = 5.0;
+
+    for cp in chokepoints.iter_mut() {
+        let Some(ref mut crossing) = cp.crossing_points else {
             continue;
         };
         let Some(obstacle_ids) = cp.obstacle_ids else {
@@ -359,18 +383,29 @@ pub fn split_contours_at_gate_points(
         };
 
         for i in 0..2 {
-            let point = crossing[i];
             let obstacle_id = obstacle_ids[i];
             if obstacle_id == 0 || obstacle_id > contours.len() {
                 continue;
             }
-            insert_point_into_contour(&mut contours[obstacle_id - 1], point);
+            let contour = &mut contours[obstacle_id - 1];
+            let point = crossing[i];
+
+            // If an existing vertex is close enough, adopt it as the crossing
+            if let Some(near) = contour.points.iter().copied()
+                .min_by(|a, b| a.dist(&point).partial_cmp(&b.dist(&point)).unwrap())
+            {
+                if near.dist(&point) < SNAP_RADIUS {
+                    crossing[i] = near;
+                    continue;
+                }
+            }
+
+            insert_point_into_contour(contour, point);
         }
     }
 }
 
 fn insert_point_into_contour(contour: &mut Contour, point: Point) {
-    // Check if point already exists
     if contour.points.contains(&point) {
         return;
     }
@@ -399,6 +434,7 @@ struct BoundaryResult {
     polygon: Option<Vec<Point>>,
     invading: bool,
     debug_arcs: Vec<DebugArc>,
+    debug_boundary: Option<DebugBoundary>,
 }
 
 /// Construct region boundaries.
@@ -412,6 +448,7 @@ pub fn construct_region_boundaries(
     for i in 0..regions.len() {
         let result = build_region_boundary(i, regions, chokepoints, contours, width, height);
         regions[i].debug_arcs = result.debug_arcs;
+        regions[i].debug_boundary = result.debug_boundary;
         if let Some(b) = result.polygon {
             if b.len() >= 3 {
                 regions[i].polygon = b;
@@ -498,6 +535,7 @@ fn build_region_boundary(
             polygon: build_single_contour_boundary(region, contours, width, height),
             invading: false,
             debug_arcs: Vec::new(),
+            debug_boundary: None,
         }
     } else {
         build_gated_boundary(region, &gates, &gate_obstacle_ids, contours, width, height)
@@ -851,6 +889,10 @@ fn build_gated_boundary(
             polygon: None,
             invading: false,
             debug_arcs: Vec::new(),
+            debug_boundary: Some(snapshot_boundary_graph(
+                &adj_graph, gates, gate_obstacle_ids,
+                &relevant_obstacles, start, goal, "bfs",
+            )),
         };
     };
 
@@ -879,6 +921,7 @@ fn build_gated_boundary(
                 polygon: Some(path),
                 invading: false,
                 debug_arcs,
+                debug_boundary: None,
             };
         };
 
@@ -962,6 +1005,10 @@ fn build_gated_boundary(
             polygon: Some(p),
             invading: true,
             debug_arcs,
+            debug_boundary: Some(snapshot_boundary_graph(
+                &adj_graph, gates, gate_obstacle_ids,
+                &relevant_obstacles, start, goal, "invasion",
+            )),
         };
     }
 
@@ -970,6 +1017,49 @@ fn build_gated_boundary(
         polygon: None,
         invading: false,
         debug_arcs,
+        debug_boundary: Some(snapshot_boundary_graph(
+            &adj_graph, gates, gate_obstacle_ids,
+            &relevant_obstacles, start, goal, "invasion",
+        )),
+    }
+}
+
+/// Snapshot the boundary adjacency graph for debug output.
+fn snapshot_boundary_graph(
+    adj_graph: &HashMap<Point, Vec<Point>>,
+    gates: &[[Point; 2]],
+    gate_obstacle_ids: &[[usize; 2]],
+    relevant_obstacles: &HashSet<usize>,
+    start: Point,
+    goal: Point,
+    failure: &str,
+) -> DebugBoundary {
+    // Deduplicate edges: only keep (a, b) where a < b lexicographically
+    let mut edges: Vec<(Point, Point)> = Vec::new();
+    for (&node, neighbors) in adj_graph {
+        for &neighbor in neighbors {
+            if (node.x, node.y) < (neighbor.x, neighbor.y) {
+                edges.push((node, neighbor));
+            }
+        }
+    }
+    edges.sort_by_key(|&(a, b)| (a.x, a.y, b.x, b.y));
+
+    let gate_data: Vec<([Point; 2], [usize; 2])> = gates.iter()
+        .zip(gate_obstacle_ids.iter())
+        .map(|(g, o)| (*g, *o))
+        .collect();
+
+    let mut obstacles: Vec<usize> = relevant_obstacles.iter().copied().collect();
+    obstacles.sort();
+
+    DebugBoundary {
+        edges,
+        gates: gate_data,
+        relevant_obstacles: obstacles,
+        start,
+        goal,
+        failure: failure.to_string(),
     }
 }
 
