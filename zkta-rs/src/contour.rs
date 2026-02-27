@@ -481,7 +481,65 @@ pub fn make_contours_manifold(
         }
     }
 
+    // Phase 3: Drop smaller hole when two holes intersect each other.
+    // Contour tracing can produce separate holes that should be one; when
+    // simplified they may cross.  Keep the one with the larger bounding box.
+    let hole_start = new_outer_count;
+    let hole_end = simplified_contours.len();
+    let mut hole_dropped: Vec<bool> = vec![false; hole_end];
+
+    for hi in hole_start..hole_end {
+        if hole_dropped[hi] { continue; }
+        for hj in (hi + 1)..hole_end {
+            if hole_dropped[hj] { continue; }
+            let ha = &simplified_contours[hi].points;
+            let hb = &simplified_contours[hj].points;
+            let mut intersects = false;
+            'hh: for i in 0..ha.len() {
+                let a1 = ha[i];
+                let a2 = ha[(i + 1) % ha.len()];
+                for j in 0..hb.len() {
+                    let b1 = hb[j];
+                    let b2 = hb[(j + 1) % hb.len()];
+                    if a1 == b1 || a1 == b2 || a2 == b1 || a2 == b2 {
+                        continue;
+                    }
+                    if segments_intersect(a1, a2, b1, b2) {
+                        intersects = true;
+                        break 'hh;
+                    }
+                }
+            }
+            if intersects {
+                let area_a = bbox_area(&simplified_contours[hi]);
+                let area_b = bbox_area(&simplified_contours[hj]);
+                let drop = if area_a < area_b { hi } else { hj };
+                eprintln!(
+                    "  Dropping H{} ({}v) that intersects H{} ({}v)",
+                    drop - new_outer_count, simplified_contours[drop].len(),
+                    (hi + hj) - drop - new_outer_count, simplified_contours[(hi + hj) - drop].len(),
+                );
+                hole_dropped[drop] = true;
+            }
+        }
+    }
+
+    let drop_count = hole_dropped[hole_start..].iter().filter(|&&d| d).count();
+    if drop_count > 0 {
+        eprintln!("Dropped {} hole(s) that intersect other holes", drop_count);
+        for hi in (hole_start..hole_end).rev() {
+            if hole_dropped[hi] {
+                simplified_contours.remove(hi);
+            }
+        }
+    }
+
     new_outer_count
+}
+
+fn bbox_area(contour: &Contour) -> i64 {
+    let b = contour.bounds().unwrap_or([0, 0, 0, 0]);
+    (b[1] - b[0]) as i64 * (b[3] - b[2]) as i64
 }
 
 /// Split a self-intersecting contour into non-intersecting parts.
