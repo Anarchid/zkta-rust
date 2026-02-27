@@ -54,7 +54,7 @@ impl StageRenderer for DiagnosticRenderer {
             }
             // Label at first point
             if let Some(&p) = contour.points.first() {
-                draw_label(&mut img, p, &format!("O{}", i + 1), color);
+                draw_label(&mut img, p, &format!("o{}", i + 1), color);
             }
         }
 
@@ -66,7 +66,7 @@ impl StageRenderer for DiagnosticRenderer {
                 draw_line(&mut img, hole.points[j], hole.points[k], color);
             }
             if let Some(&p) = hole.points.first() {
-                draw_label(&mut img, p, &format!("H{}", i + 1), color);
+                draw_label(&mut img, p, &format!("h{}", i + 1), color);
             }
         }
 
@@ -253,7 +253,7 @@ impl StageRenderer for DiagnosticRenderer {
                 if r > 3 {
                     draw_circle_outline(&mut img, node.position, r, [30, 100, 90]);
                 }
-                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [64, 224, 208]);
+                draw_label(&mut img, node.position, &format!("r{}:{:.0}", id, node.radius), [64, 224, 208]);
             }
         }
         for &id in &graph.chokepoint_nodes {
@@ -263,7 +263,7 @@ impl StageRenderer for DiagnosticRenderer {
                 if r > 3 {
                     draw_circle_outline(&mut img, node.position, r, [100, 30, 30]);
                 }
-                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [255, 50, 50]);
+                draw_label(&mut img, node.position, &format!("c{}:{:.0}", id, node.radius), [255, 50, 50]);
             }
         }
         // Unmarked nodes
@@ -271,7 +271,7 @@ impl StageRenderer for DiagnosticRenderer {
         for (&id, node) in &graph.nodes {
             if !all_marked.contains(&id) {
                 draw_filled_circle(&mut img, node.position, 2, [120, 120, 120]);
-                draw_label(&mut img, node.position, &format!("N{} r{:.0}", id, node.radius), [90, 90, 90]);
+                draw_label(&mut img, node.position, &format!("n{}:{:.0}", id, node.radius), [90, 90, 90]);
             }
         }
 
@@ -541,10 +541,17 @@ fn char_glyph(ch: char) -> [u8; 5] {
         'O' => [0b0110, 0b1001, 0b1001, 0b1001, 0b0110],
         'R' => [0b1110, 0b1001, 0b1110, 0b1010, 0b1001],
         'S' => [0b0111, 0b1000, 0b0110, 0b0001, 0b1110],
+        'N' => [0b1001, 0b1101, 0b1111, 0b1011, 0b1001],
         'V' => [0b1001, 0b1001, 0b1001, 0b0110, 0b0110],
         '(' => [0b0010, 0b0100, 0b0100, 0b0100, 0b0010],
         ')' => [0b0100, 0b0010, 0b0010, 0b0010, 0b0100],
+        'c' => [0b0000, 0b0110, 0b1000, 0b1000, 0b0110],
+        'h' => [0b1000, 0b1000, 0b1110, 0b1001, 0b1001],
+        'n' => [0b0000, 0b1110, 0b1001, 0b1001, 0b1001],
+        'o' => [0b0000, 0b0110, 0b1001, 0b1001, 0b0110],
+        'r' => [0b0000, 0b1011, 0b1100, 0b1000, 0b1000],
         'v' => [0b0000, 0b1001, 0b1001, 0b0110, 0b0110],
+        ':' => [0b0000, 0b0100, 0b0000, 0b0100, 0b0000],
         _ => [0b0000, 0b0000, 0b0000, 0b0000, 0b0000],
     }
 }
