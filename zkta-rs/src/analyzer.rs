@@ -166,7 +166,7 @@ fn analyze_inner(
     // problems (spurious hole-wall chokepoints) than it solved.
 
     // Stage 11: Split contours at gate points
-    region::split_contours_at_gate_points(&mut simplified_contours, &chokepoints);
+    region::split_contours_at_gate_points(&mut simplified_contours, &mut chokepoints);
 
     // Stage 12: Construct region boundaries
     region::construct_region_boundaries(
