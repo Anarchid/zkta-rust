@@ -32,8 +32,8 @@ pub fn build_voronoi(
 
     // Helper: get or create deduplicated point index
     let mut get_point_index = |x: i32, y: i32| -> usize {
-        let px = geometry::snap(geometry::snap(x, width, snap_tolerance), 1, snap_tolerance);
-        let py = geometry::snap(geometry::snap(y, height, snap_tolerance), 1, snap_tolerance);
+        let px = geometry::snap(geometry::snap(x, width - 1, snap_tolerance), 1, snap_tolerance);
+        let py = geometry::snap(geometry::snap(y, height - 1, snap_tolerance), 1, snap_tolerance);
         let key = (px, py);
         if let Some(&idx) = point_map.get(&key) {
             idx
