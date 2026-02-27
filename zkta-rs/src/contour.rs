@@ -552,7 +552,35 @@ fn split_self_intersections(contour: &Contour) -> Vec<Contour> {
         return vec![contour.clone()];
     }
 
-    // Find first self-intersection
+    // Check for shared-vertex bowties: a vertex that appears more than once
+    // creates two loops meeting at a point.  Split into separate contours.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if pts[i] == pts[j] {
+                // Loop 1: pts[i..j], Loop 2: pts[j..n] + pts[0..i]
+                let loop1: Vec<_> = pts[i..j].to_vec();
+                let mut loop2: Vec<_> = pts[j..n].to_vec();
+                loop2.extend_from_slice(&pts[0..i]);
+                // Include the shared vertex in both loops (it's their meeting point)
+                // loop1 already starts at pts[i]; loop2 already starts at pts[j]==pts[i]
+
+                let mut result = Vec::new();
+                if loop1.len() >= 3 {
+                    let c1 = Contour::from_points(loop1);
+                    result.extend(split_self_intersections(&c1));
+                }
+                if loop2.len() >= 3 {
+                    let c2 = Contour::from_points(loop2);
+                    result.extend(split_self_intersections(&c2));
+                }
+                if !result.is_empty() {
+                    return result;
+                }
+            }
+        }
+    }
+
+    // Find first edge-crossing self-intersection
     for i in 0..n {
         let i_next = (i + 1) % n;
         for j in (i + 2)..n {
@@ -821,13 +849,13 @@ fn simplify_contours_inner(
             continue;
         }
         // Thin but important obstacle: re-simplify with lower tolerance
-        // until we get a polygon.  Only for outer contours — rescuing thin
-        // holes changes topology and causes regressions.
+        // until we get a polygon that also passes the area check.
+        // Only for outer contours — rescuing thin holes changes topology.
         if rescue_thin && c.area() > 100.0 {
             let mut tol = tolerance / 2.0;
             while tol >= 1.0 {
                 let retry = simplify_one_pinned(c, tol, &pinned);
-                if retry.len() >= 3 {
+                if retry.len() >= 3 && retry.area() > 100.0 {
                     result.push(retry);
                     break;
                 }
