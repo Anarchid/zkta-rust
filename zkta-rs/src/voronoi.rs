@@ -564,8 +564,8 @@ pub fn get_border_points(
     let mut all_points: Vec<Point> = Vec::new();
     for contour in contours {
         for p in &contour.points {
-            let px = geometry::snap(geometry::snap(p.x, width, snap_tolerance), 1, snap_tolerance);
-            let py = geometry::snap(geometry::snap(p.y, height, snap_tolerance), 1, snap_tolerance);
+            let px = geometry::snap(geometry::snap(p.x, width - 1, snap_tolerance), 1, snap_tolerance);
+            let py = geometry::snap(geometry::snap(p.y, height - 1, snap_tolerance), 1, snap_tolerance);
             all_points.push(Point::new(px, py));
         }
     }
@@ -579,18 +579,18 @@ pub fn get_border_points(
 
     let mut borders = vec![Vec::new(); 4];
 
-    // Add points near each border
+    // Add points near each border (strict < to match snap tolerance)
     for &p in &all_points {
-        if (p.y - 1).abs() <= snap_tolerance {
+        if (p.y - 1).abs() < snap_tolerance {
             borders[0].push(p);
         }
-        if (p.y - (height - 1)).abs() <= snap_tolerance {
+        if (p.y - (height - 1)).abs() < snap_tolerance {
             borders[1].push(p);
         }
-        if (p.x - (width - 1)).abs() <= snap_tolerance {
+        if (p.x - (width - 1)).abs() < snap_tolerance {
             borders[2].push(p);
         }
-        if (p.x - 1).abs() <= snap_tolerance {
+        if (p.x - 1).abs() < snap_tolerance {
             borders[3].push(p);
         }
     }
