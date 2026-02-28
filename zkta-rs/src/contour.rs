@@ -51,6 +51,11 @@ impl Contour {
 
     /// Shoelace area formula.
     pub fn area(&self) -> f64 {
+        self.signed_area().abs()
+    }
+
+    /// Signed shoelace area: positive = CCW, negative = CW.
+    fn signed_area(&self) -> f64 {
         if self.points.len() < 3 {
             return 0.0;
         }
@@ -61,7 +66,7 @@ impl Contour {
             let next = self.points[(i + 1) % n];
             a += (cur.x as f64) * (next.y as f64) - (next.x as f64) * (cur.y as f64);
         }
-        a.abs() / 2.0
+        a / 2.0
     }
 }
 
@@ -353,6 +358,137 @@ pub fn simplify_holes(
     let result = simplify_contours_inner(&as_contours, tolerance, false, width, height);
     eprintln!("Simplified {} holes to {} hole contours", holes.len(), result.len());
     result
+}
+
+/// Close small wall gaps where the same obstacle touches a border in two nearby
+/// places with a short passable gap between them.
+///
+/// Scans each map border for the pattern: up to `max_obstacle` pixels of obstacle
+/// label L, then up to `max_gap` pixels of passable, then up to `max_obstacle`
+/// pixels of the same label L.  When found, fills the gap with obstacle pixels
+/// so re-tracing produces a closed contour + interior hole instead of a thin
+/// open U-shape.
+///
+/// Returns the number of gaps closed.
+pub fn close_wall_gaps(
+    label_map: &[Vec<i32>],
+    bitmap: &mut [bool],
+    width: u32,
+    height: u32,
+) -> usize {
+    let w = width as usize;
+    let h = height as usize;
+    let max_obstacle = 3; // max obstacle-run length to consider
+    let max_gap = 5;      // max passable-gap length to fill
+
+    let mut closed = 0;
+
+    // Build wall scanlines: (wall_name, pixel iterator as Vec<(x,y)>)
+    let walls: Vec<(&str, Vec<(usize, usize)>)> = vec![
+        ("top",    (0..w).map(|x| (x, 0)).collect()),
+        ("bottom", (0..w).map(|x| (x, h - 1)).collect()),
+        ("left",   (0..h).map(|y| (0, y)).collect()),
+        ("right",  (0..h).map(|y| (w - 1, y)).collect()),
+    ];
+
+    for (wall_name, pixels) in &walls {
+        // Collect labels along this wall.  Treat -1 (hole interior) as belonging
+        // to a nearby obstacle rather than as passable gap — holes adjacent to an
+        // obstacle on the wall should not break the obstacle run.
+        let raw_labels: Vec<i32> = pixels.iter().map(|&(x, y)| label_map[y][x]).collect();
+
+        // Coalesce: replace short -1 runs that are sandwiched between the same
+        // positive label with that label.  This handles hole-boundary pixels
+        // sitting between two obstacle pixels of the same label.
+        let mut labels = raw_labels.clone();
+        {
+            let n = labels.len();
+            let mut i = 0;
+            while i < n {
+                if labels[i] == -1 {
+                    let start = i;
+                    while i < n && labels[i] == -1 {
+                        i += 1;
+                    }
+                    let hole_len = i - start;
+                    if hole_len <= 2 {
+                        // Look at labels on either side
+                        let before = if start > 0 { labels[start - 1] } else { 0 };
+                        let after = if i < n { labels[i] } else { 0 };
+                        if before > 0 && before == after {
+                            for j in start..i {
+                                labels[j] = before;
+                            }
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Scan for: obstacle run (label>0, len<=max_obstacle),
+        //           gap (label<=0, len<=max_gap),
+        //           obstacle run (same label, len<=max_obstacle)
+        let n = labels.len();
+        let mut i = 0;
+        while i < n {
+            // Skip non-obstacle
+            if labels[i] <= 0 {
+                i += 1;
+                continue;
+            }
+
+            // Found obstacle start — measure this run
+            let obs_label = labels[i];
+            let obs1_start = i;
+            while i < n && labels[i] == obs_label {
+                i += 1;
+            }
+            let obs1_len = i - obs1_start;
+            if obs1_len > max_obstacle {
+                continue; // obstacle run too long, not a thin arm tip
+            }
+
+            // Now expect a gap (label <= 0: passable or unassigned hole)
+            let gap_start = i;
+            while i < n && labels[i] <= 0 {
+                i += 1;
+            }
+            let gap_len = i - gap_start;
+            if gap_len == 0 || gap_len > max_gap {
+                continue;
+            }
+
+            // Now expect the same obstacle label
+            if i >= n || labels[i] != obs_label {
+                continue;
+            }
+            let obs2_start = i;
+            while i < n && labels[i] == obs_label {
+                i += 1;
+            }
+            let obs2_len = i - obs2_start;
+            if obs2_len > max_obstacle {
+                continue;
+            }
+
+            // Match! Fill the gap.
+            eprintln!(
+                "  Closing {} wall gap: label {} at {}..{} ({}px obstacle, {}px gap, {}px obstacle)",
+                wall_name, obs_label,
+                obs1_start, obs2_start + obs2_len,
+                obs1_len, gap_len, obs2_len
+            );
+            for gi in gap_start..gap_start + gap_len {
+                let (x, y) = pixels[gi];
+                bitmap[y * w + x] = true;
+            }
+            closed += 1;
+        }
+    }
+
+    closed
 }
 
 /// Fix simplified contours that became non-manifold after Douglas-Peucker:

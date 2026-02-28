@@ -48,11 +48,27 @@ pub fn analyze_bitmap(
     height: u32,
     renderer: &dyn StageRenderer,
 ) -> AnalysisResult {
+    let mut bitmap: Vec<bool> = obstacle_map.to_vec();
     eprintln!("  [0/13] Tracing contours on {}x{} bitmap...", width, height);
     let pixel_test = |x: u32, y: u32| -> bool {
-        obstacle_map[(y * width + x) as usize]
+        bitmap[(y * width + x) as usize]
     };
     let (full_contours, holes, label_map) = contour::trace_contours(width, height, &pixel_test);
+
+    // Close small wall gaps: where the same obstacle touches a border in two
+    // nearby places with a short passable gap between them, fill the gap so
+    // re-tracing produces a closed contour + hole instead of a thin U-shape.
+    let closed = contour::close_wall_gaps(&label_map, &mut bitmap, width, height);
+    let (full_contours, holes, label_map) = if closed > 0 {
+        eprintln!("  Closed {} wall gap(s), re-tracing...", closed);
+        let pixel_test2 = |x: u32, y: u32| -> bool {
+            bitmap[(y * width + x) as usize]
+        };
+        contour::trace_contours(width, height, &pixel_test2)
+    } else {
+        (full_contours, holes, label_map)
+    };
+
     eprintln!("  [0/13] Contour tracing done");
     analyze_inner(full_contours, holes, label_map, width, height, renderer)
 }
@@ -66,8 +82,23 @@ pub fn analyze(
     let width = img.width();
     let height = img.height();
 
-    let pixel_test = |x: u32, y: u32| -> bool { is_obstacle(*img.get_pixel(x, y)) };
+    // Build a boolean bitmap so we can mutate it for wall closure.
+    let mut bitmap: Vec<bool> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| is_obstacle(*img.get_pixel(x, y))))
+        .collect();
+
+    let pixel_test = |x: u32, y: u32| -> bool { bitmap[(y * width + x) as usize] };
     let (full_contours, holes, label_map) = contour::trace_contours(width, height, &pixel_test);
+
+    let closed = contour::close_wall_gaps(&label_map, &mut bitmap, width, height);
+    let (full_contours, holes, label_map) = if closed > 0 {
+        eprintln!("  Closed {} wall gap(s), re-tracing...", closed);
+        let pixel_test2 = |x: u32, y: u32| -> bool { bitmap[(y * width + x) as usize] };
+        contour::trace_contours(width, height, &pixel_test2)
+    } else {
+        (full_contours, holes, label_map)
+    };
+
     analyze_inner(full_contours, holes, label_map, width, height, renderer)
 }
 
