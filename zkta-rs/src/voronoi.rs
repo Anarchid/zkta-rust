@@ -357,6 +357,16 @@ pub fn build_voronoi(
             Err(_) => continue,
         };
 
+        // Discard edges with vertices far outside the map bounds.
+        // Intersecting input segments can produce degenerate Voronoi cells
+        // with near-infinite vertex coordinates.
+        let margin = (width.max(height) as f64) * 2.0;
+        if v0.x().abs() > margin || v0.y().abs() > margin
+            || v1.x().abs() > margin || v1.y().abs() > margin
+        {
+            continue;
+        }
+
         let p0 = Point::new(v0.x().round() as i32, v0.y().round() as i32);
         let p1 = Point::new(v1.x().round() as i32, v1.y().round() as i32);
 
