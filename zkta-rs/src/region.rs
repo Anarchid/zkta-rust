@@ -87,11 +87,30 @@ pub fn compute_chokepoint_gates(
     let mut cp_id = 0;
     for &cp_node_id in &graph.chokepoint_nodes {
         let node = &graph.nodes[&cp_node_id];
+
+        // A chokepoint with no clearance is not a passage. Node radii of 0
+        // occur when a medial-axis vertex lands on an obstacle pixel; verify
+        // against the R-tree and drop the chokepoint if it really has no
+        // width (regions joined only by it are physically disconnected).
+        let mut radius = node.radius;
+        if radius <= 0.5 {
+            let nearest = rtree.nearest_n(node.position, 1);
+            let true_dist = nearest.first().map(|e| e.2).unwrap_or(0.0);
+            if true_dist <= 0.5 {
+                eprintln!(
+                    "  dropping zero-width chokepoint at ({},{})",
+                    node.position.x, node.position.y
+                );
+                continue;
+            }
+            radius = true_dist;
+        }
+
         let mut cp = Chokepoint {
             id: cp_id,
             node_id: cp_node_id,
             position: node.position,
-            radius: node.radius,
+            radius,
             crossing_points: None,
             obstacle_ids: None,
             region_ids: HashSet::new(),
@@ -104,17 +123,33 @@ pub fn compute_chokepoint_gates(
             cp.obstacle_ids = Some(crossing.obstacle_ids);
         }
 
-        // Link to adjacent region nodes
-        for &neighbor_id in graph.adjacency.get(&cp_node_id).unwrap_or(&HashSet::new()) {
-            if graph.region_nodes.contains(&neighbor_id) {
-                let region_idx = find_or_create_region(
-                    &mut regions,
-                    &mut node_to_region,
-                    neighbor_id,
-                    graph,
-                );
-                cp.region_ids.insert(region_idx);
-                regions[region_idx].chokepoint_node_ids.insert(cp_node_id);
+        // Link to adjacent region nodes. Follow chains of adjacent chokepoint
+        // nodes so a choke separated from a region by other chokes still
+        // learns both of its sides; only directly adjacent regions get the
+        // choke in their own gate set (distant gates are not on the region's
+        // boundary and would derail boundary tracing).
+        let mut stack: Vec<usize> = vec![cp_node_id];
+        let mut seen: HashSet<usize> = HashSet::new();
+        seen.insert(cp_node_id);
+        while let Some(nid) = stack.pop() {
+            for &neighbor_id in graph.adjacency.get(&nid).unwrap_or(&HashSet::new()) {
+                if !seen.insert(neighbor_id) {
+                    continue;
+                }
+                if graph.region_nodes.contains(&neighbor_id) {
+                    let region_idx = find_or_create_region(
+                        &mut regions,
+                        &mut node_to_region,
+                        neighbor_id,
+                        graph,
+                    );
+                    cp.region_ids.insert(region_idx);
+                    if nid == cp_node_id {
+                        regions[region_idx].chokepoint_node_ids.insert(cp_node_id);
+                    }
+                } else if graph.chokepoint_nodes.contains(&neighbor_id) {
+                    stack.push(neighbor_id);
+                }
             }
         }
 
@@ -201,6 +236,38 @@ fn find_crossing_points(position: Point, rtree: &ObstacleRTree, _w: i32, _h: i32
                 best = Some((i, cp_candidate, *dist));
             }
             break; // entries are sorted by distance, so first opposite match is nearest
+        }
+    }
+
+    // Fallbacks when no opposite-side segment exists among the nearest 20
+    // (concave pockets, map corners, chokes between two lobes of a single
+    // obstacle): prefer the nearest segment from a different obstacle, then
+    // any segment with a distinct crossing point. A slightly skewed gate
+    // beats no gate — regions downstream need both crossing points.
+    if best.is_none() {
+        for (i, (oid, seg, dist)) in entries.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let cp_candidate = closest_point_on_segment(
+                position,
+                Point::new(seg.p1[0].round() as i32, seg.p1[1].round() as i32),
+                Point::new(seg.p2[0].round() as i32, seg.p2[1].round() as i32),
+            );
+            if cp_candidate == cp1 {
+                continue;
+            }
+            let different_obstacle = *oid != first.0;
+            match &best {
+                None => best = Some((i, cp_candidate, *dist)),
+                Some(_) if different_obstacle => {
+                    best = Some((i, cp_candidate, *dist));
+                }
+                _ => continue,
+            }
+            if different_obstacle {
+                break; // entries sorted by distance: first different-obstacle hit wins
+            }
         }
     }
 
@@ -390,11 +457,14 @@ pub fn split_contours_at_gate_points(
             let contour = &mut contours[obstacle_id - 1];
             let point = crossing[i];
 
-            // If an existing vertex is close enough, adopt it as the crossing
+            // If an existing vertex is close enough, adopt it as the crossing —
+            // unless that would collapse the gate to zero length (both
+            // crossing points snapping to the same vertex on very narrow
+            // chokes), which destroys the gate for boundary tracing.
             if let Some(near) = contour.points.iter().copied()
                 .min_by(|a, b| a.dist(&point).partial_cmp(&b.dist(&point)).unwrap())
             {
-                if near.dist(&point) < SNAP_RADIUS {
+                if near.dist(&point) < SNAP_RADIUS && near != crossing[1 - i] {
                     crossing[i] = near;
                     continue;
                 }
@@ -445,6 +515,31 @@ pub fn construct_region_boundaries(
     width: i32,
     height: i32,
 ) {
+    // Map corner ownership: each corner belongs to the region whose center is
+    // nearest. Used to close approximate boundaries of wide-open regions
+    // whose perimeter is mostly map edge (no obstacles connect gate arcs to
+    // the border, so exact tracing cannot succeed there).
+    let corners = [
+        Point::new(1, 1),
+        Point::new(width - 2, 1),
+        Point::new(width - 2, height - 2),
+        Point::new(1, height - 2),
+    ];
+    let corner_owner: Vec<Option<usize>> = corners
+        .iter()
+        .map(|c| {
+            regions
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    c.dist(&a.center)
+                        .partial_cmp(&c.dist(&b.center))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+        })
+        .collect();
+
     for i in 0..regions.len() {
         let result = build_region_boundary(i, regions, chokepoints, contours, width, height);
         regions[i].debug_arcs = result.debug_arcs;
@@ -457,6 +552,77 @@ pub fn construct_region_boundaries(
                 } else {
                     regions[i].is_closed = true;
                 }
+            }
+        }
+
+        // A polygon that swallows other regions' centers is a runaway trace:
+        // either the "eliminated 0 edges" map-edge sweep (invading) or a
+        // legally-traced loop around the whole map that never touches an
+        // obstacle its own gates reference (closed, non-invading). Regions
+        // partition space — capturing foreign centers is topologically wrong.
+        // Invading polygons are discarded on any capture; closed ones are
+        // given slack for small enclosed pockets (a known shortcut artifact).
+        if regions[i].polygon.len() >= 3 {
+            let captured = regions
+                .iter()
+                .enumerate()
+                .filter(|(j, r)| *j != i && point_in_polygon(r.center, &regions[i].polygon))
+                .count();
+            let runaway = if regions[i].invading {
+                captured > 0
+            } else {
+                captured > 2
+            };
+            if runaway {
+                eprintln!(
+                    "  R{}: {} polygon captures {} other region centers — discarding",
+                    regions[i].id,
+                    if regions[i].invading { "invading" } else { "runaway" },
+                    captured
+                );
+                regions[i].polygon = Vec::new();
+                regions[i].invading = false;
+                regions[i].is_closed = false;
+            }
+        }
+
+        if regions[i].polygon.len() < 3 {
+            // Boundary construction failed (typically: the region's gates do
+            // not form a closed cycle around it because a passage has no
+            // chokepoint). Emit an approximate polygon — the fan of gate
+            // crossing points plus any map corners this region owns, ordered
+            // by angle around the center. is_closed stays false.
+            let owned: Vec<Point> = corners
+                .iter()
+                .enumerate()
+                .filter(|(ci, _)| corner_owner[*ci] == Some(i))
+                .map(|(_, p)| *p)
+                .collect();
+            let fan = gate_fan_polygon(&regions[i], chokepoints, &owned);
+            if fan.len() >= 3 {
+                eprintln!(
+                    "  R{}: using approximate gate-fan boundary ({} pts, {} corners)",
+                    regions[i].id, fan.len(), owned.len()
+                );
+                regions[i].polygon = fan;
+            } else {
+                // Last resort: the region's own clearance disc. Every region
+                // has a center and a max-inscribed-circle radius by
+                // construction, so this is always available and never lies
+                // about area the region doesn't control.
+                let r = regions[i].radius.max(2.0);
+                let (cx, cy) = (regions[i].center.x as f64, regions[i].center.y as f64);
+                let disc: Vec<Point> = (0..8)
+                    .map(|k| {
+                        let a = std::f64::consts::TAU * k as f64 / 8.0;
+                        Point::new(
+                            (cx + r * a.cos()).round().clamp(0.0, (width - 1) as f64) as i32,
+                            (cy + r * a.sin()).round().clamp(0.0, (height - 1) as f64) as i32,
+                        )
+                    })
+                    .collect();
+                eprintln!("  R{}: using clearance-disc boundary", regions[i].id);
+                regions[i].polygon = disc;
             }
         }
     }
@@ -504,6 +670,45 @@ pub fn construct_region_boundaries(
     }
 
     eprintln!("Built boundaries: {}/{} closed", closed, regions.len());
+}
+
+/// Approximate open-region polygon: all gate crossing points of the region's
+/// chokepoints, ordered by angle around the region center. Used as a fallback
+/// when exact boundary tracing fails, so consumers never see a degenerate
+/// (<3 point) polygon. With a single gate the region center itself is added
+/// to form a (thin) triangle.
+fn gate_fan_polygon(
+    region: &Region,
+    chokepoints: &[Chokepoint],
+    owned_corners: &[Point],
+) -> Vec<Point> {
+    let mut pts: Vec<Point> = owned_corners.to_vec();
+    for cp in chokepoints {
+        // Union of direct gates and chain-linked chokes (region_ids): a
+        // region whose only choke is chain-distant still needs fan points.
+        if !region.chokepoint_node_ids.contains(&cp.node_id)
+            && !cp.region_ids.contains(&region.id)
+        {
+            continue;
+        }
+        if let Some(cps) = cp.crossing_points {
+            pts.push(cps[0]);
+            pts.push(cps[1]);
+        }
+    }
+    pts.sort_by_key(|p| (p.x, p.y));
+    pts.dedup();
+    if pts.len() == 2 {
+        pts.push(region.center);
+    }
+    let cx = region.center.x as f64;
+    let cy = region.center.y as f64;
+    pts.sort_by(|a, b| {
+        let aa = (a.y as f64 - cy).atan2(a.x as f64 - cx);
+        let ab = (b.y as f64 - cy).atan2(b.x as f64 - cx);
+        aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    pts
 }
 
 fn build_region_boundary(
@@ -786,6 +991,92 @@ fn build_boundary_graph(
     adj_graph
 }
 
+/// Insert gate crossing points as vertices into their obstacle contours.
+///
+/// Crossing points are perpendicular projections onto contour *segments* and
+/// are generally NOT contour vertices. Without splicing them in, the gate
+/// edges float disconnected from the contour-vertex adjacency graph and BFS
+/// can never thread gate → arc → gate ("BFS failed to find path", the
+/// dominant boundary-construction failure). Returns augmented copies of the
+/// contours; all downstream logic (graph build, invasion arc swap) then sees
+/// gates as ordinary consecutive-vertex edges.
+fn splice_gate_points(
+    contours: &[Contour],
+    gates: &[[Point; 2]],
+    gate_obstacle_ids: &[[usize; 2]],
+) -> Vec<Contour> {
+    // obstacle id -> [(edge_index, t_along_edge, gate_point)]
+    let mut inserts: HashMap<usize, Vec<(usize, f64, Point)>> = HashMap::new();
+
+    for (gi, gate) in gates.iter().enumerate() {
+        for k in 0..2 {
+            let oid = gate_obstacle_ids[gi][k];
+            if oid == 0 || oid > contours.len() {
+                continue; // border (0) is handled by add_map_boundary_edges
+            }
+            let g = gate[k];
+            let c = &contours[oid - 1];
+            if c.points.contains(&g) {
+                continue; // already a vertex
+            }
+            let n = c.points.len();
+            let mut best: Option<(usize, f64, f64)> = None; // (edge, t, dist_sq)
+            for i in 0..n {
+                let a = c.points[i];
+                let b = c.points[(i + 1) % n];
+                let abx = (b.x - a.x) as f64;
+                let aby = (b.y - a.y) as f64;
+                let apx = (g.x - a.x) as f64;
+                let apy = (g.y - a.y) as f64;
+                let len_sq = abx * abx + aby * aby;
+                let t = if len_sq > 0.0 {
+                    ((apx * abx + apy * aby) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let dx = apx - t * abx;
+                let dy = apy - t * aby;
+                let d = dx * dx + dy * dy;
+                if best.is_none() || d < best.unwrap().2 {
+                    best = Some((i, t, d));
+                }
+            }
+            if let Some((edge, t, _)) = best {
+                inserts.entry(oid).or_default().push((edge, t, g));
+            }
+        }
+    }
+
+    let mut aug: Vec<Contour> = contours.to_vec();
+    for (oid, mut ins) in inserts {
+        ins.sort_by(|a, b| {
+            (a.0, a.1)
+                .partial_cmp(&(b.0, b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let c = &contours[oid - 1];
+        let mut pts: Vec<Point> = Vec::with_capacity(c.points.len() + ins.len());
+        let mut it = ins.into_iter().peekable();
+        for (i, &p) in c.points.iter().enumerate() {
+            pts.push(p);
+            while let Some(&(edge, _, g)) = it.peek() {
+                if edge == i {
+                    pts.push(g);
+                    it.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        pts.dedup();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        aug[oid - 1] = Contour::from_points(pts);
+    }
+    aug
+}
+
 fn build_gated_boundary(
     region: &Region,
     gates: &[[Point; 2]],
@@ -794,6 +1085,10 @@ fn build_gated_boundary(
     width: i32,
     height: i32,
 ) -> BoundaryResult {
+    // Splice gate points into contours so gate edges connect to the arcs.
+    let aug_contours = splice_gate_points(contours, gates, gate_obstacle_ids);
+    let contours = &aug_contours[..];
+
     // Collect relevant obstacles
     let mut relevant_obstacles: HashSet<usize> = HashSet::new();
     for ids in gate_obstacle_ids {
@@ -885,6 +1180,15 @@ fn build_gated_boundary(
 
     let Some(mut path) = best_path else {
         eprintln!("  R{}: BFS failed to find path", region.id);
+        for (gi, gate) in gates.iter().enumerate() {
+            let d0 = adj_graph.get(&gate[0]).map(|n| n.len()).unwrap_or(0);
+            let d1 = adj_graph.get(&gate[1]).map(|n| n.len()).unwrap_or(0);
+            eprintln!(
+                "    gate{} ({},{})deg{} <-> ({},{})deg{} obst [{}, {}]",
+                gi, gate[0].x, gate[0].y, d0, gate[1].x, gate[1].y, d1,
+                gate_obstacle_ids[gi][0], gate_obstacle_ids[gi][1],
+            );
+        }
         return BoundaryResult {
             polygon: None,
             invading: false,

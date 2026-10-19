@@ -1,5 +1,7 @@
 use image::RgbaImage;
 
+use std::collections::HashSet;
+
 use crate::contour::{self, Contour, LabeledContour};
 use crate::geometry::Point;
 use crate::graph::{self, RegionGraph};
@@ -133,6 +135,52 @@ fn analyze_inner(
     // survive simplification so graph builder rejects those areas as obstacle.
     contour::seal_dropped_holes(&holes, 8.0, &mut label_map, width, height);
     contour::clear_dropped_obstacles(&full_contours, 8.0, &mut label_map, width, height);
+
+    // Fully-open map: no obstacle survived simplification. The medial axis of
+    // the bare border rectangle has all its vertices on the border pixels,
+    // which the graph builder rejects — so the pipeline would return 0 regions
+    // for a map that is trivially one navigable region. Synthesize that region
+    // directly instead.
+    if simplified_contours.is_empty() {
+        eprintln!("  No obstacles after simplification — map is one open region");
+        let w = width as i32;
+        let h = height as i32;
+        let mut graph = RegionGraph::new();
+        let center = Point::new(w / 2, h / 2);
+        let seed = graph.add_node(center);
+        let region = Region {
+            id: 0,
+            seed_node_id: seed,
+            center,
+            radius: (w.min(h) as f64) / 2.0,
+            polygon: vec![
+                Point::new(0, 0),
+                Point::new(w - 1, 0),
+                Point::new(w - 1, h - 1),
+                Point::new(0, h - 1),
+            ],
+            holes: Vec::new(),
+            is_closed: true,
+            invading: false,
+            debug_arcs: Vec::new(),
+            chokepoint_node_ids: HashSet::new(),
+            debug_boundary: None,
+        };
+        let result = AnalysisResult {
+            regions: vec![region],
+            chokepoints: Vec::new(),
+            simplified_contours,
+            full_contours,
+            holes,
+            label_map,
+            graph,
+            voronoi_edges: Vec::new(),
+            width,
+            height,
+        };
+        eprintln!("Analysis complete: 1 regions, 0 chokepoints");
+        return result;
+    }
 
     // Stage 2c: Paint border pixels in labelMap so graph builder rejects vertices
     // on the map edge. Don't add a separate border contour — border sub-segments are

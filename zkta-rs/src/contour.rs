@@ -54,6 +54,22 @@ impl Contour {
         self.signed_area().abs()
     }
 
+    /// Closed-polygon perimeter (includes the last-to-first edge).
+    pub fn perimeter(&self) -> f64 {
+        if self.points.len() < 2 {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for i in 0..self.points.len() {
+            let a = self.points[i];
+            let b = self.points[(i + 1) % self.points.len()];
+            let dx = (a.x - b.x) as f64;
+            let dy = (a.y - b.y) as f64;
+            sum += (dx * dx + dy * dy).sqrt();
+        }
+        sum
+    }
+
     /// Signed shoelace area: positive = CCW, negative = CW.
     fn signed_area(&self) -> f64 {
         if self.points.len() < 3 {
@@ -525,7 +541,7 @@ pub fn make_contours_manifold(
             );
         }
         for part in parts {
-            if part.len() >= 3 && part.area() > 100.0 {
+            if passes_size_filter(&part, !is_hole) {
                 if is_hole {
                     new_holes.push(part);
                 } else {
@@ -815,20 +831,10 @@ pub fn seal_dropped_holes(
     let mut total_pixels = 0usize;
 
     for hole in holes {
-        // Re-simplify to check if this hole would survive
-        let coords: Vec<Coord<f64>> = hole.points.iter().map(|p| Coord {
-            x: p.x as f64,
-            y: p.y as f64,
-        }).collect();
-        let ls = LineString::new(coords);
-        let simplified = ls.simplify(&tolerance);
-        let pts: Vec<Point> = simplified
-            .0
-            .iter()
-            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
-            .collect();
-        let contour = Contour::from_points(pts);
-        if contour.len() >= 3 && contour.area() > 100.0 {
+        // Re-simplify to check if this hole would survive (same decision
+        // path as simplify_holes: no thin-rescue for holes).
+        let as_contour = Contour::from_points(hole.points.clone());
+        if simplify_survivor(&as_contour, tolerance, false, width, height).is_some() {
             continue; // Survived simplification — keep as passable
         }
 
@@ -913,22 +919,7 @@ pub fn clear_dropped_obstacles(
 
     for (i, c) in contours.iter().enumerate() {
         let label = (i + 1) as i32; // label_map is 1-indexed
-        let coords: Vec<Coord<f64>> = c.points.iter().map(|p| Coord {
-            x: p.x as f64,
-            y: p.y as f64,
-        }).collect();
-        let ls = LineString::new(coords);
-        let simplified = ls.simplify(&tolerance);
-        let mut pts: Vec<Point> = simplified
-            .0
-            .iter()
-            .map(|c| Point::new(c.x.round() as i32, c.y.round() as i32))
-            .collect();
-        if pts.len() > 1 && pts.first() == pts.last() {
-            pts.pop();
-        }
-        let contour = Contour::from_points(pts);
-        if contour.len() >= 3 && contour.area() > 100.0 {
+        if simplify_survivor(c, tolerance, true, width, height).is_some() {
             continue; // Survived simplification
         }
         dropped_labels.insert(label);
@@ -974,33 +965,93 @@ fn simplify_contours_inner(
     width: u32,
     height: u32,
 ) -> Vec<Contour> {
-    let w = width as i32;
-    let h = height as i32;
     let mut result = Vec::new();
     for c in contours {
-        let pinned = find_pinned_vertices(c, w, h);
-        let contour = simplify_one_pinned(c, tolerance, &pinned);
-        if contour.len() >= 3 && contour.area() > 100.0 {
+        if let Some(contour) = simplify_survivor(c, tolerance, rescue_thin, width, height) {
             result.push(contour);
-            continue;
-        }
-        // Thin but important obstacle: re-simplify with lower tolerance
-        // until we get a polygon that also passes the area check.
-        // Only for outer contours — rescuing thin holes changes topology.
-        if rescue_thin && c.area() > 100.0 {
-            let mut tol = tolerance / 2.0;
-            while tol >= 1.0 {
-                let retry = simplify_one_pinned(c, tol, &pinned);
-                if retry.len() >= 3 && retry.area() > 100.0 {
-                    result.push(retry);
-                    break;
-                }
-                tol /= 2.0;
-            }
         }
     }
     eprintln!("Simplified to {} contours", result.len());
     result
+}
+
+/// Size filter for simplified contours. Real obstacles either enclose
+/// meaningful area or are thin-but-long walls (cliff lines) whose shoelace
+/// area is tiny no matter how long they are — those are kept by spatial
+/// extent (bounding-box side, in slope cells; 16 cells = 256 elmos).
+/// Holes (`is_outer == false`) stay area-only: a thin crack inside an
+/// obstacle is not a navigable pocket worth modelling.
+pub(crate) fn passes_size_filter(c: &Contour, is_outer: bool) -> bool {
+    if c.len() < 3 {
+        return false;
+    }
+    if c.area() > 100.0 {
+        return true;
+    }
+    if !is_outer {
+        return false;
+    }
+    match c.bounds() {
+        Some([min_x, max_x, min_y, max_y]) => {
+            (max_x - min_x).max(max_y - min_y) >= 16
+        }
+        None => false,
+    }
+}
+
+/// Simplify one raw traced contour and decide whether it survives.
+///
+/// Single source of truth for the survive/drop decision — used by
+/// `simplify_contours`/`simplify_holes` AND by the label-map reconciliation
+/// (`seal_dropped_holes`, `clear_dropped_obstacles`), which previously
+/// re-derived the decision without vertex pinning or thin-rescue and could
+/// disagree with what the Voronoi input actually contains.
+///
+/// `rescue_thin` doubles as the outer-vs-hole flag: it is true exactly for
+/// outer contours.
+pub(crate) fn simplify_survivor(
+    c: &Contour,
+    tolerance: f64,
+    rescue_thin: bool,
+    width: u32,
+    height: u32,
+) -> Option<Contour> {
+    let pinned = find_pinned_vertices(c, width as i32, height as i32);
+    let contour = simplify_one_pinned(c, tolerance, &pinned);
+
+    // Historical filter first, byte-for-byte: contours the old pipeline kept
+    // must keep identical geometry, because the medial axis (and therefore
+    // marginal chokepoint classification) is sensitive to vertex placement.
+    if contour.len() >= 3 && contour.area() > 100.0 {
+        return Some(contour);
+    }
+    if rescue_thin && c.area() > 100.0 {
+        let mut tol = tolerance / 2.0;
+        while tol >= 1.0 {
+            let retry = simplify_one_pinned(c, tol, &pinned);
+            if retry.len() >= 3 && retry.area() > 100.0 {
+                return Some(retry);
+            }
+            tol /= 2.0;
+        }
+    }
+
+    // Additive extent rule: thin-but-long walls the old filter dropped
+    // entirely (tiny shoelace area regardless of length) are kept.
+    if passes_size_filter(&contour, rescue_thin) {
+        return Some(contour);
+    }
+    if rescue_thin && passes_size_filter(c, true) {
+        let mut tol = tolerance / 2.0;
+        while tol >= 1.0 {
+            let retry = simplify_one_pinned(c, tol, &pinned);
+            if passes_size_filter(&retry, true) {
+                return Some(retry);
+            }
+            tol /= 2.0;
+        }
+    }
+    None
 }
 
 fn simplify_one(c: &Contour, tolerance: f64) -> Contour {

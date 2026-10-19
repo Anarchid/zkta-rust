@@ -67,7 +67,10 @@ fn export_to_json(result: &AnalysisResult, output_path: &str) {
         let cp_ids: Vec<usize> = result
             .chokepoints
             .iter()
-            .filter(|cp| r.chokepoint_node_ids.contains(&cp.node_id))
+            .filter(|cp| {
+                r.chokepoint_node_ids.contains(&cp.node_id)
+                    || cp.region_ids.contains(&r.id)
+            })
             .map(|cp| cp.id)
             .collect();
 
@@ -188,6 +191,19 @@ fn render_final_result(result: &AnalysisResult, output_path: &str) {
             for j in 0..inset.len() {
                 let k = (j + 1) % inset.len();
                 render::draw_line(&mut img, inset[j], inset[k], color);
+            }
+        }
+    }
+
+    // Approximate (open) region polygons — gate fans and other fallbacks:
+    // dim outline, no fill, so they read as tentative rather than traced.
+    for (i, r) in result.regions.iter().enumerate() {
+        if !r.is_closed && !r.invading && r.polygon.len() >= 3 {
+            let c = region_colors[i].0;
+            let dim = [c[0] / 2, c[1] / 2, c[2] / 2];
+            for j in 0..r.polygon.len() {
+                let k = (j + 1) % r.polygon.len();
+                render::draw_line(&mut img, r.polygon[j], r.polygon[k], dim);
             }
         }
     }
