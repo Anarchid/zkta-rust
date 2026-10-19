@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use crate::det::HashSet;
 use std::path::PathBuf;
 
 use crate::analyzer::StageRenderer;
@@ -20,7 +20,7 @@ impl DiagnosticRenderer {
     fn save(&self, name: &str, img: &image::RgbImage) {
         let path = self.dir.join(format!("{}.png", name));
         if let Err(e) = img.save(&path) {
-            eprintln!("Failed to save {:?}: {}", path, e);
+            log::warn!("Failed to save {:?}: {}", path, e);
         }
     }
 

@@ -65,7 +65,7 @@ impl ObstacleRTree {
             }
         }
 
-        eprintln!("Built R-tree with {} segments", segments.len());
+        log::debug!("Built R-tree with {} segments", segments.len());
         Self {
             tree: RTree::bulk_load(segments),
         }

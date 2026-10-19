@@ -1,4 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::det::{HashMap, HashSet};
 
 use crate::geometry::Point;
 use crate::rtree::ObstacleRTree;
@@ -24,10 +26,10 @@ pub struct RegionGraph {
 impl RegionGraph {
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
-            adjacency: HashMap::new(),
-            region_nodes: HashSet::new(),
-            chokepoint_nodes: HashSet::new(),
+            nodes: HashMap::default(),
+            adjacency: HashMap::default(),
+            region_nodes: HashSet::default(),
+            chokepoint_nodes: HashSet::default(),
             next_id: 0,
         }
     }
@@ -44,7 +46,7 @@ impl RegionGraph {
                 parent: None,
             },
         );
-        self.adjacency.insert(id, HashSet::new());
+        self.adjacency.insert(id, HashSet::default());
         id
     }
 
@@ -126,7 +128,7 @@ pub fn build_graph(
     height: i32,
 ) -> RegionGraph {
     let mut graph = RegionGraph::new();
-    let mut point_to_id: HashMap<Point, usize> = HashMap::new();
+    let mut point_to_id: HashMap<Point, usize> = HashMap::default();
 
     let get_or_create = |graph: &mut RegionGraph,
                          point_to_id: &mut HashMap<Point, usize>,
@@ -165,7 +167,7 @@ pub fn build_graph(
         graph.add_edge(id1, id2);
     }
 
-    eprintln!("Built graph with {} nodes", graph.nodes.len());
+    log::debug!("Built graph with {} nodes", graph.nodes.len());
     graph
 }
 
@@ -200,7 +202,7 @@ pub fn prune_leaves(graph: &mut RegionGraph, rtree: &ObstacleRTree, threshold: f
             }
         }
     }
-    eprintln!(
+    log::debug!(
         "Pruned {} leaf nodes, {} remaining",
         removed,
         graph.nodes.len()
@@ -297,7 +299,7 @@ pub fn classify_nodes(graph: &mut RegionGraph) {
     }
 
     let unmarked = graph.nodes.len() - graph.region_nodes.len() - graph.chokepoint_nodes.len();
-    eprintln!(
+    log::debug!(
         "Classified: {} regions, {} chokepoints, {} unmarked",
         graph.region_nodes.len(),
         graph.chokepoint_nodes.len(),
@@ -317,12 +319,12 @@ pub fn classify_nodes(graph: &mut RegionGraph) {
             } else {
                 "unmarked"
             };
-            let neighbor_info: Vec<String> = graph.adjacency.get(&id).unwrap_or(&HashSet::new())
+            let neighbor_info: Vec<String> = graph.adjacency.get(&id).unwrap_or(&HashSet::default())
                 .iter()
                 .filter_map(|&nid| graph.nodes.get(&nid).map(|n| (nid, n)))
                 .map(|(nid, n)| format!("N{}:{:.1}", nid, n.radius))
                 .collect();
-            eprintln!(
+            log::debug!(
                 "  N{}: ({},{}) deg={} r={:.1} [{}] neighbors=[{}]",
                 id, node.position.x, node.position.y, deg, node.radius, class,
                 neighbor_info.join(", ")
@@ -333,7 +335,7 @@ pub fn classify_nodes(graph: &mut RegionGraph) {
 
 fn is_local_minimum(graph: &RegionGraph, id: usize) -> bool {
     let r = graph.nodes[&id].radius;
-    for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::new()) {
+    for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::default()) {
         if let Some(n) = graph.nodes.get(&nid) {
             if n.radius < r {
                 return false;
@@ -345,7 +347,7 @@ fn is_local_minimum(graph: &RegionGraph, id: usize) -> bool {
 
 fn is_local_maximum(graph: &RegionGraph, id: usize) -> bool {
     let r = graph.nodes[&id].radius;
-    for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::new()) {
+    for &nid in graph.adjacency.get(&id).unwrap_or(&HashSet::default()) {
         if let Some(n) = graph.nodes.get(&nid) {
             if n.radius > r {
                 return false;
@@ -364,14 +366,14 @@ pub fn contract_graph(graph: &mut RegionGraph) {
         .copied()
         .collect();
 
-    let mut new_neighbors: HashMap<usize, HashSet<usize>> = HashMap::new();
+    let mut new_neighbors: HashMap<usize, HashSet<usize>> = HashMap::default();
     for &m in &marked {
-        new_neighbors.insert(m, HashSet::new());
+        new_neighbors.insert(m, HashSet::default());
     }
 
     for &m in &marked {
         let neighbors = graph.neighbors(m);
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut visited: HashSet<usize> = HashSet::default();
         visited.insert(m);
 
         let mut queue: VecDeque<usize> = VecDeque::new();
@@ -416,7 +418,7 @@ pub fn contract_graph(graph: &mut RegionGraph) {
     // Phase 2: Merge contiguous same-type nodes
     merge_contiguous(graph);
 
-    eprintln!(
+    log::debug!(
         "After contraction: {} regions, {} chokepoints, {} total",
         graph.region_nodes.len(),
         graph.chokepoint_nodes.len(),

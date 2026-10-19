@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 /// Integer 2D point (pixel coordinates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -128,8 +128,8 @@ pub fn dijkstra(
         }
     }
 
-    let mut dist: HashMap<Point, f64> = HashMap::new();
-    let mut prev: HashMap<Point, Point> = HashMap::new();
+    let mut dist: HashMap<Point, f64> = HashMap::default();
+    let mut prev: HashMap<Point, Point> = HashMap::default();
     let mut heap = BinaryHeap::new();
 
     dist.insert(start, 0.0);

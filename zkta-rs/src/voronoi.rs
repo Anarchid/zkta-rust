@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::det::HashMap;
 
 use boostvoronoi::prelude::*;
 
@@ -16,7 +16,7 @@ pub fn build_voronoi(
     let start = std::time::Instant::now();
 
     // Collect all unique points with deduplication
-    let mut point_map: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut point_map: HashMap<(i32, i32), usize> = HashMap::default();
     let mut points: Vec<[i32; 2]> = Vec::new();
     let mut segments: Vec<[i32; 4]> = Vec::new();
 
@@ -77,8 +77,8 @@ pub fn build_voronoi(
 
     // Track which contour segments lie on borders (covered by obstacle contour edges).
     // We'll use this to only add border sub-segments for UNCOVERED gaps.
-    let mut contour_border_pairs: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
+    let mut contour_border_pairs: crate::det::HashSet<(usize, usize)> =
+        crate::det::HashSet::default();
 
     // Build segments for contour edges (skip those that lie on borders)
     let mut segment_contour_id: Vec<usize> = Vec::new();
@@ -139,12 +139,12 @@ pub fn build_voronoi(
             border_segment_count += 1;
         }
     }
-    eprintln!("Added {} border sub-segments to Voronoi input", border_segment_count);
+    log::debug!("Added {} border sub-segments to Voronoi input", border_segment_count);
 
     // Deduplicate segments (both orderings), keeping contour IDs in sync
     {
-        let mut seen: std::collections::HashSet<(i32, i32, i32, i32)> =
-            std::collections::HashSet::new();
+        let mut seen: crate::det::HashSet<(i32, i32, i32, i32)> =
+            crate::det::HashSet::default();
         let mut keep = Vec::with_capacity(segments.len());
         for i in 0..segments.len() {
             let s = segments[i];
@@ -204,7 +204,7 @@ pub fn build_voronoi(
     }
     let removed_points = points_to_remove.iter().filter(|&&r| r).count();
     if removed_points > 0 {
-        eprintln!("Removed {} points lying on segments", removed_points);
+        log::debug!("Removed {} points lying on segments", removed_points);
         // Build new point list, skipping removed points
         let mut new_points: Vec<[i32; 2]> = Vec::new();
         for (i, p) in points.iter().enumerate() {
@@ -238,7 +238,7 @@ pub fn build_voronoi(
                     let c1 = segment_contour_id[i];
                     let c2 = segment_contour_id[j];
                     let label = |c: usize| if c == usize::MAX { "border".to_string() } else { format!("C{}", c) };
-                    eprintln!(
+                    log::warn!(
                         "  WARNING: intersecting segments: [{},{}]-[{},{}] ({}) x [{},{}]-[{},{}] ({})",
                         s1[0], s1[1], s1[2], s1[3], label(c1),
                         s2[0], s2[1], s2[2], s2[3], label(c2),
@@ -249,7 +249,7 @@ pub fn build_voronoi(
         }
     }
     if intersection_count > 0 {
-        eprintln!("Total {} intersecting segment pairs!", intersection_count);
+        log::debug!("Total {} intersecting segment pairs!", intersection_count);
     }
 
     // Check for collinear overlapping segments
@@ -260,7 +260,7 @@ pub fn build_voronoi(
             let s2 = &segments[j];
             if are_collinear_overlapping(s1, s2) {
                 if overlap_count < 5 {
-                    eprintln!(
+                    log::warn!(
                         "  WARNING: collinear overlap: [{},{}]-[{},{}] vs [{},{}]-[{},{}]",
                         s1[0], s1[1], s1[2], s1[3], s2[0], s2[1], s2[2], s2[3]
                     );
@@ -270,10 +270,10 @@ pub fn build_voronoi(
         }
     }
     if overlap_count > 0 {
-        eprintln!("Total {} collinear overlapping segment pairs!", overlap_count);
+        log::debug!("Total {} collinear overlapping segment pairs!", overlap_count);
     }
 
-    eprintln!(
+    log::debug!(
         "Voronoi input: {} points, {} segments",
         points.len(),
         segments.len()
@@ -291,7 +291,7 @@ pub fn build_voronoi(
             dump.push_str(&format!("{},{}\n", p[0], p[1]));
         }
         let _ = std::fs::write("points_dump.csv", dump);
-        eprintln!("Dumped segments/points to CSV");
+        log::debug!("Dumped segments/points to CSV");
     }
 
     // Build Voronoi diagram (catch panics from degenerate geometry)
@@ -307,11 +307,11 @@ pub fn build_voronoi(
     let diagram = match build_result {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
-            eprintln!("Voronoi construction failed: {:?}", e);
+            log::warn!("Voronoi construction failed: {:?}", e);
             return Vec::new();
         }
         Err(_) => {
-            eprintln!("Voronoi construction panicked (degenerate geometry)");
+            log::warn!("Voronoi construction panicked (degenerate geometry)");
             return Vec::new();
         }
     };
@@ -400,7 +400,7 @@ pub fn build_voronoi(
         edges.push((p0, p1));
     }
 
-    eprintln!(
+    log::debug!(
         "Generated Voronoi with {} medial axis edges in {:?}",
         edges.len(),
         start.elapsed()
@@ -514,7 +514,7 @@ fn record_covered_border_pairs(
     idx_j: usize,
     idx_k: usize,
     info: &BorderInfo,
-    covered: &mut std::collections::HashSet<(usize, usize)>,
+    covered: &mut crate::det::HashSet<(usize, usize)>,
 ) {
     for border in &info.borders {
         let pos_j = border.iter().position(|&i| i == idx_j);

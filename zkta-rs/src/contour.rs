@@ -162,7 +162,7 @@ pub fn trace_contours(
         }
     }
 
-    eprintln!(
+    log::debug!(
         "Traced {} contours, {} holes",
         contours.len(),
         holes.len()
@@ -170,8 +170,15 @@ pub fn trace_contours(
     (contours, holes, label_map)
 }
 
+/// Without diagnostic rendering, aborted contours are only logged.
+#[cfg(not(feature = "render"))]
+fn dump_aborted_contour(contour: &Contour, _w: i32, _h: i32, sx: i32, sy: i32) {
+    log::warn!("    Aborted contour ({} pts) starting at ({}, {})", contour.points.len(), sx, sy);
+}
+
 /// Dump the first aborted contour to a diagnostic image.
 /// Only writes once (uses a static flag to avoid spamming).
+#[cfg(feature = "render")]
 fn dump_aborted_contour(contour: &Contour, w: i32, h: i32, sx: i32, sy: i32) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DUMPED: AtomicBool = AtomicBool::new(false);
@@ -210,8 +217,8 @@ fn dump_aborted_contour(contour: &Contour, w: i32, h: i32, sx: i32, sy: i32) {
 
     let path = "aborted_contour.png";
     match img.save(path) {
-        Ok(_) => eprintln!("    Dumped aborted contour ({} pts) to {}", n, path),
-        Err(e) => eprintln!("    Failed to dump aborted contour: {}", e),
+        Ok(_) => log::warn!("    Dumped aborted contour ({} pts) to {}", n, path),
+        Err(e) => log::warn!("    Failed to dump aborted contour: {}", e),
     }
 }
 
@@ -251,7 +258,7 @@ fn trace_contour(
             pdir = np.direction;
 
             if contour.len() > MAX_CONTOUR_POINTS {
-                eprintln!("    WARNING: contour starting at ({},{}) exceeded {} pts, aborting trace",
+                log::warn!("    WARNING: contour starting at ({},{}) exceeded {} pts, aborting trace",
                     sx, sy, MAX_CONTOUR_POINTS);
                 dump_aborted_contour(&contour, w, h, sx, sy);
                 break;
@@ -372,7 +379,7 @@ pub fn simplify_holes(
         .map(|h| Contour::from_points(h.points.clone()))
         .collect();
     let result = simplify_contours_inner(&as_contours, tolerance, false, width, height);
-    eprintln!("Simplified {} holes to {} hole contours", holes.len(), result.len());
+    log::debug!("Simplified {} holes to {} hole contours", holes.len(), result.len());
     result
 }
 
@@ -490,7 +497,7 @@ pub fn close_wall_gaps(
             }
 
             // Match! Fill the gap.
-            eprintln!(
+            log::debug!(
                 "  Closing {} wall gap: label {} at {}..{} ({}px obstacle, {}px gap, {}px obstacle)",
                 wall_name, obs_label,
                 obs1_start, obs2_start + obs2_len,
@@ -533,7 +540,7 @@ pub fn make_contours_manifold(
         let is_hole = ci >= outer_count;
         if parts.len() > 1 {
             splits += parts.len() - 1;
-            eprintln!(
+            log::debug!(
                 "  Split self-intersecting C{} ({}) into {} parts",
                 ci,
                 if is_hole { "hole" } else { "outer" },
@@ -557,7 +564,7 @@ pub fn make_contours_manifold(
     simplified_contours.extend(new_holes);
 
     if splits > 0 {
-        eprintln!(
+        log::debug!(
             "Made manifold: {} splits, {} outer + {} holes",
             splits, new_outer_count,
             simplified_contours.len() - new_outer_count
@@ -624,7 +631,7 @@ pub fn make_contours_manifold(
     }
 
     if !holes_to_drop.is_empty() {
-        eprintln!(
+        log::debug!(
             "Dropped {} hole(s) that intersect parent obstacle boundary",
             holes_to_drop.len()
         );
@@ -666,7 +673,7 @@ pub fn make_contours_manifold(
                 let area_a = bbox_area(&simplified_contours[hi]);
                 let area_b = bbox_area(&simplified_contours[hj]);
                 let drop = if area_a < area_b { hi } else { hj };
-                eprintln!(
+                log::debug!(
                     "  Dropping H{} ({}v) that intersects H{} ({}v)",
                     drop - new_outer_count, simplified_contours[drop].len(),
                     (hi + hj) - drop - new_outer_count, simplified_contours[(hi + hj) - drop].len(),
@@ -678,7 +685,7 @@ pub fn make_contours_manifold(
 
     let drop_count = hole_dropped[hole_start..].iter().filter(|&&d| d).count();
     if drop_count > 0 {
-        eprintln!("Dropped {} hole(s) that intersect other holes", drop_count);
+        log::debug!("Dropped {} hole(s) that intersect other holes", drop_count);
         for hi in (hole_start..hole_end).rev() {
             if hole_dropped[hi] {
                 simplified_contours.remove(hi);
@@ -895,7 +902,7 @@ pub fn seal_dropped_holes(
     }
 
     if sealed > 0 {
-        eprintln!("Sealed {} dropped holes ({} pixels) in label_map", sealed, total_pixels);
+        log::debug!("Sealed {} dropped holes ({} pixels) in label_map", sealed, total_pixels);
     }
 }
 
@@ -913,9 +920,9 @@ pub fn clear_dropped_obstacles(
     width: u32,
     height: u32,
 ) {
-    use std::collections::HashSet;
+    use crate::det::HashSet;
 
-    let mut dropped_labels: HashSet<i32> = HashSet::new();
+    let mut dropped_labels: HashSet<i32> = HashSet::default();
 
     for (i, c) in contours.iter().enumerate() {
         let label = (i + 1) as i32; // label_map is 1-indexed
@@ -939,7 +946,7 @@ pub fn clear_dropped_obstacles(
         }
     }
 
-    eprintln!(
+    log::debug!(
         "Cleared {} pixels from {} dropped obstacles in label_map",
         cleared,
         dropped_labels.len()
@@ -971,7 +978,7 @@ fn simplify_contours_inner(
             result.push(contour);
         }
     }
-    eprintln!("Simplified to {} contours", result.len());
+    log::debug!("Simplified to {} contours", result.len());
     result
 }
 

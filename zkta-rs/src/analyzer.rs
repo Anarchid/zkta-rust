@@ -1,6 +1,7 @@
+#[cfg(feature = "render")]
 use image::RgbaImage;
 
-use std::collections::HashSet;
+use crate::det::HashSet;
 
 use crate::contour::{self, Contour, LabeledContour};
 use crate::geometry::Point;
@@ -51,7 +52,7 @@ pub fn analyze_bitmap(
     renderer: &dyn StageRenderer,
 ) -> AnalysisResult {
     let mut bitmap: Vec<bool> = obstacle_map.to_vec();
-    eprintln!("  [0/13] Tracing contours on {}x{} bitmap...", width, height);
+    log::debug!("  [0/13] Tracing contours on {}x{} bitmap...", width, height);
     let pixel_test = |x: u32, y: u32| -> bool {
         bitmap[(y * width + x) as usize]
     };
@@ -62,7 +63,7 @@ pub fn analyze_bitmap(
     // re-tracing produces a closed contour + hole instead of a thin U-shape.
     let closed = contour::close_wall_gaps(&label_map, &mut bitmap, width, height);
     let (full_contours, holes, label_map) = if closed > 0 {
-        eprintln!("  Closed {} wall gap(s), re-tracing...", closed);
+        log::debug!("  Closed {} wall gap(s), re-tracing...", closed);
         let pixel_test2 = |x: u32, y: u32| -> bool {
             bitmap[(y * width + x) as usize]
         };
@@ -71,11 +72,12 @@ pub fn analyze_bitmap(
         (full_contours, holes, label_map)
     };
 
-    eprintln!("  [0/13] Contour tracing done");
+    log::debug!("  [0/13] Contour tracing done");
     analyze_inner(full_contours, holes, label_map, width, height, renderer)
 }
 
 /// Run the full terrain analysis pipeline from an RGBA image.
+#[cfg(feature = "render")]
 pub fn analyze(
     img: &RgbaImage,
     is_obstacle: &dyn Fn(image::Rgba<u8>) -> bool,
@@ -94,7 +96,7 @@ pub fn analyze(
 
     let closed = contour::close_wall_gaps(&label_map, &mut bitmap, width, height);
     let (full_contours, holes, label_map) = if closed > 0 {
-        eprintln!("  Closed {} wall gap(s), re-tracing...", closed);
+        log::debug!("  Closed {} wall gap(s), re-tracing...", closed);
         let pixel_test2 = |x: u32, y: u32| -> bool { bitmap[(y * width + x) as usize] };
         contour::trace_contours(width, height, &pixel_test2)
     } else {
@@ -114,7 +116,7 @@ fn analyze_inner(
     renderer: &dyn StageRenderer,
 ) -> AnalysisResult {
     let total_pts: usize = full_contours.iter().map(|c| c.len()).sum();
-    eprintln!("  [1/13] Traced {} contours ({} points)", full_contours.len(), total_pts);
+    log::debug!("  [1/13] Traced {} contours ({} points)", full_contours.len(), total_pts);
     renderer.on_contours_traced(&full_contours, &holes, &label_map, width, height);
 
     // Stage 2: Simplify contours (outer boundaries + hole inner boundaries)
@@ -124,7 +126,7 @@ fn analyze_inner(
     let hole_count = simplified_holes.len();
     simplified_contours.extend(simplified_holes);
     let simp_pts: usize = simplified_contours.iter().map(|c| c.len()).sum();
-    eprintln!("  [2/13] Simplified to {} contours ({} outer + {} holes, {} points)",
+    log::debug!("  [2/13] Simplified to {} contours ({} outer + {} holes, {} points)",
         simplified_contours.len(), outer_count, hole_count, simp_pts);
 
     // Stage 2b: Fix non-manifold contours from Douglas-Peucker simplification:
@@ -142,7 +144,7 @@ fn analyze_inner(
     // for a map that is trivially one navigable region. Synthesize that region
     // directly instead.
     if simplified_contours.is_empty() {
-        eprintln!("  No obstacles after simplification — map is one open region");
+        log::debug!("  No obstacles after simplification — map is one open region");
         let w = width as i32;
         let h = height as i32;
         let mut graph = RegionGraph::new();
@@ -163,7 +165,7 @@ fn analyze_inner(
             is_closed: true,
             invading: false,
             debug_arcs: Vec::new(),
-            chokepoint_node_ids: HashSet::new(),
+            chokepoint_node_ids: HashSet::default(),
             debug_boundary: None,
         };
         let result = AnalysisResult {
@@ -178,7 +180,7 @@ fn analyze_inner(
             width,
             height,
         };
-        eprintln!("Analysis complete: 1 regions, 0 chokepoints");
+        log::debug!("Analysis complete: 1 regions, 0 chokepoints");
         return result;
     }
 
@@ -199,45 +201,45 @@ fn analyze_inner(
     renderer.on_contours_simplified(&simplified_contours, outer_count, &label_map, width, height);
 
     // Stage 3: Build R-tree (border contour is now part of simplified_contours)
-    eprintln!("  [3/13] Building R-tree...");
+    log::debug!("  [3/13] Building R-tree...");
     let border_points = voronoi::get_border_points(&simplified_contours, w, h);
     let rtree = ObstacleRTree::build(&simplified_contours)
         .with_border_segments(w, h, &border_points);
 
     // Stage 4: Generate Voronoi + medial axis filter
-    eprintln!("  [4/13] Generating Voronoi diagram...");
+    log::debug!("  [4/13] Generating Voronoi diagram...");
     let voronoi_edges = voronoi::build_voronoi(&simplified_contours, width as i32, height as i32);
-    eprintln!("  [4/13] Voronoi: {} edges", voronoi_edges.len());
+    log::debug!("  [4/13] Voronoi: {} edges", voronoi_edges.len());
     renderer.on_voronoi_built(&voronoi_edges, &simplified_contours, &label_map, width, height);
 
     // Stage 5: Build node graph (prune vertices inside obstacles / out of bounds)
-    eprintln!("  [5/13] Building node graph...");
+    log::debug!("  [5/13] Building node graph...");
     let mut graph = graph::build_graph(&voronoi_edges, &label_map, width as i32, height as i32);
-    eprintln!("  [5/13] Graph: {} nodes", graph.nodes.len());
+    log::debug!("  [5/13] Graph: {} nodes", graph.nodes.len());
     renderer.on_graph_built(&graph, &voronoi_edges, &simplified_contours, &label_map, width, height);
 
     // Stage 6: Prune leaf nodes
-    eprintln!("  [6/13] Pruning leaves...");
+    log::debug!("  [6/13] Pruning leaves...");
     graph::prune_leaves(&mut graph, &rtree, TOO_CLOSE_TO_OBSTACLE);
-    eprintln!("  [6/13] After pruning: {} nodes", graph.nodes.len());
+    log::debug!("  [6/13] After pruning: {} nodes", graph.nodes.len());
     renderer.on_graph_pruned(&graph, &simplified_contours, &label_map, width, height);
 
     // Stage 7: Calculate radii
-    eprintln!("  [7/13] Calculating radii...");
+    log::debug!("  [7/13] Calculating radii...");
     graph::calculate_radii(&mut graph, &rtree);
 
     // Stage 8: Classify nodes (BWTA2)
-    eprintln!("  [8/13] Classifying nodes...");
+    log::debug!("  [8/13] Classifying nodes...");
     graph::classify_nodes(&mut graph);
     renderer.on_classified(&graph, &simplified_contours, &label_map, width, height);
 
     // Stage 9: Contract graph
-    eprintln!("  [9/13] Contracting graph...");
+    log::debug!("  [9/13] Contracting graph...");
     graph::contract_graph(&mut graph);
     renderer.on_contracted(&graph, &simplified_contours, &label_map, width, height);
 
     // Stage 10: Compute chokepoint gates
-    eprintln!("  [10/13] Computing chokepoints...");
+    log::debug!("  [10/13] Computing chokepoints...");
     let (mut regions, mut chokepoints) = region::compute_chokepoint_gates(&graph, &rtree, w, h);
 
     // Stage 10b: Synthetic chokepoints disabled — the Voronoi medial axis
@@ -259,7 +261,7 @@ fn analyze_inner(
     // Stage 13: Remove duplicate regions
     region::remove_duplicate_regions(&mut regions, &mut chokepoints);
 
-    eprintln!(
+    log::debug!(
         "Analysis complete: {} regions, {} chokepoints",
         regions.len(),
         chokepoints.len()

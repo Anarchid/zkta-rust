@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::det::{HashMap, HashSet};
 
 use crate::contour::Contour;
 use crate::geometry::{
@@ -82,7 +82,7 @@ pub fn compute_chokepoint_gates(
     let mut chokepoints: Vec<Chokepoint> = Vec::new();
 
     // Map from node_id -> region index for quick lookup
-    let mut node_to_region: HashMap<usize, usize> = HashMap::new();
+    let mut node_to_region: HashMap<usize, usize> = HashMap::default();
 
     let mut cp_id = 0;
     for &cp_node_id in &graph.chokepoint_nodes {
@@ -97,7 +97,7 @@ pub fn compute_chokepoint_gates(
             let nearest = rtree.nearest_n(node.position, 1);
             let true_dist = nearest.first().map(|e| e.2).unwrap_or(0.0);
             if true_dist <= 0.5 {
-                eprintln!(
+                log::debug!(
                     "  dropping zero-width chokepoint at ({},{})",
                     node.position.x, node.position.y
                 );
@@ -113,7 +113,7 @@ pub fn compute_chokepoint_gates(
             radius,
             crossing_points: None,
             obstacle_ids: None,
-            region_ids: HashSet::new(),
+            region_ids: HashSet::default(),
         };
         cp_id += 1;
 
@@ -129,10 +129,10 @@ pub fn compute_chokepoint_gates(
         // choke in their own gate set (distant gates are not on the region's
         // boundary and would derail boundary tracing).
         let mut stack: Vec<usize> = vec![cp_node_id];
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<usize> = HashSet::default();
         seen.insert(cp_node_id);
         while let Some(nid) = stack.pop() {
-            for &neighbor_id in graph.adjacency.get(&nid).unwrap_or(&HashSet::new()) {
+            for &neighbor_id in graph.adjacency.get(&nid).unwrap_or(&HashSet::default()) {
                 if !seen.insert(neighbor_id) {
                     continue;
                 }
@@ -161,7 +161,7 @@ pub fn compute_chokepoint_gates(
         find_or_create_region(&mut regions, &mut node_to_region, r_node_id, graph);
     }
 
-    eprintln!("Computed {} chokepoint gates, {} regions", chokepoints.len(), regions.len());
+    log::debug!("Computed {} chokepoint gates, {} regions", chokepoints.len(), regions.len());
     (regions, chokepoints)
 }
 
@@ -186,7 +186,7 @@ fn find_or_create_region(
         is_closed: false,
         invading: false,
         debug_arcs: Vec::new(),
-        chokepoint_node_ids: HashSet::new(),
+        chokepoint_node_ids: HashSet::default(),
         debug_boundary: None,
     });
     node_to_region.insert(node_id, idx);
@@ -292,7 +292,7 @@ pub fn insert_synthetic_chokepoints(
     let gap_threshold = 8.0;
 
     // Collect already-bridged obstacle pairs
-    let mut bridged_pairs: HashSet<u64> = HashSet::new();
+    let mut bridged_pairs: HashSet<u64> = HashSet::default();
     for cp in chokepoints.iter() {
         if let Some(ids) = cp.obstacle_ids {
             bridged_pairs.insert(pair_key(ids[0], ids[1]));
@@ -341,7 +341,7 @@ pub fn insert_synthetic_chokepoints(
                     radius: dist / 2.0,
                     crossing_points: Some([cp1, cp2]),
                     obstacle_ids: Some([obstacle_id, other_id]),
-                    region_ids: HashSet::new(),
+                    region_ids: HashSet::default(),
                 };
 
                 // Link to nearest region on each side of gate line
@@ -398,7 +398,7 @@ pub fn insert_synthetic_chokepoints(
                     regions[ri].chokepoint_node_ids.insert(node_id);
                 }
 
-                eprintln!(
+                log::debug!(
                     "Synthetic chokepoint C{} between O{} and O{} (gap={:.1}px)",
                     synthetic_cp.id, obstacle_id, other_id, dist
                 );
@@ -410,7 +410,7 @@ pub fn insert_synthetic_chokepoints(
         }
     }
     if inserted > 0 {
-        eprintln!("Inserted {} synthetic chokepoints", inserted);
+        log::debug!("Inserted {} synthetic chokepoints", inserted);
     }
 }
 
@@ -574,7 +574,7 @@ pub fn construct_region_boundaries(
                 captured > 2
             };
             if runaway {
-                eprintln!(
+                log::debug!(
                     "  R{}: {} polygon captures {} other region centers — discarding",
                     regions[i].id,
                     if regions[i].invading { "invading" } else { "runaway" },
@@ -600,7 +600,7 @@ pub fn construct_region_boundaries(
                 .collect();
             let fan = gate_fan_polygon(&regions[i], chokepoints, &owned);
             if fan.len() >= 3 {
-                eprintln!(
+                log::debug!(
                     "  R{}: using approximate gate-fan boundary ({} pts, {} corners)",
                     regions[i].id, fan.len(), owned.len()
                 );
@@ -621,7 +621,7 @@ pub fn construct_region_boundaries(
                         )
                     })
                     .collect();
-                eprintln!("  R{}: using clearance-disc boundary", regions[i].id);
+                log::debug!("  R{}: using clearance-disc boundary", regions[i].id);
                 regions[i].polygon = disc;
             }
         }
@@ -629,7 +629,7 @@ pub fn construct_region_boundaries(
     let closed = regions.iter().filter(|r| r.is_closed).count();
     let invading = regions.iter().filter(|r| r.invading).count();
     if invading > 0 {
-        eprintln!("  ({} invading regions kept for diagnostics)", invading);
+        log::debug!("  ({} invading regions kept for diagnostics)", invading);
     }
 
     // Detect interior obstacles: obstacle contours entirely inside a region
@@ -666,10 +666,10 @@ pub fn construct_region_boundaries(
         }
     }
     if total_holes > 0 {
-        eprintln!("Found {} interior obstacle holes in regions", total_holes);
+        log::debug!("Found {} interior obstacle holes in regions", total_holes);
     }
 
-    eprintln!("Built boundaries: {}/{} closed", closed, regions.len());
+    log::debug!("Built boundaries: {}/{} closed", closed, regions.len());
 }
 
 /// Approximate open-region polygon: all gate crossing points of the region's
@@ -890,10 +890,10 @@ fn bfs_forced_gates(
 ) -> Option<BfsResult> {
     use std::collections::VecDeque;
 
-    let mut prev: HashMap<Point, Point> = HashMap::new();
+    let mut prev: HashMap<Point, Point> = HashMap::default();
     let mut visited_chokes = initial_visited.clone();
     let mut queue: VecDeque<Point> = VecDeque::new();
-    let mut processed: HashSet<Point> = HashSet::new();
+    let mut processed: HashSet<Point> = HashSet::default();
 
     queue.push_back(start);
 
@@ -969,7 +969,7 @@ fn build_boundary_graph(
     width: i32,
     height: i32,
 ) -> HashMap<Point, Vec<Point>> {
-    let mut adj_graph: HashMap<Point, Vec<Point>> = HashMap::new();
+    let mut adj_graph: HashMap<Point, Vec<Point>> = HashMap::default();
 
     // 1. Add full contour edges for each relevant obstacle
     for &obstacle_id in relevant_obstacles {
@@ -1006,7 +1006,7 @@ fn splice_gate_points(
     gate_obstacle_ids: &[[usize; 2]],
 ) -> Vec<Contour> {
     // obstacle id -> [(edge_index, t_along_edge, gate_point)]
-    let mut inserts: HashMap<usize, Vec<(usize, f64, Point)>> = HashMap::new();
+    let mut inserts: HashMap<usize, Vec<(usize, f64, Point)>> = HashMap::default();
 
     for (gi, gate) in gates.iter().enumerate() {
         for k in 0..2 {
@@ -1090,7 +1090,7 @@ fn build_gated_boundary(
     let contours = &aug_contours[..];
 
     // Collect relevant obstacles
-    let mut relevant_obstacles: HashSet<usize> = HashSet::new();
+    let mut relevant_obstacles: HashSet<usize> = HashSet::default();
     for ids in gate_obstacle_ids {
         for &id in ids {
             if id > 0 && id <= contours.len() {
@@ -1104,7 +1104,7 @@ fn build_gated_boundary(
     );
 
     // Build gate lookup: each gate point → [(partner, gate_index), ...]
-    let mut gate_map: HashMap<Point, Vec<(Point, usize)>> = HashMap::new();
+    let mut gate_map: HashMap<Point, Vec<(Point, usize)>> = HashMap::default();
     for (i, gate) in gates.iter().enumerate() {
         gate_map.entry(gate[0]).or_default().push((gate[1], i));
         gate_map.entry(gate[1]).or_default().push((gate[0], i));
@@ -1120,18 +1120,18 @@ fn build_gated_boundary(
 
     // Start chokepoint is pre-visited; its direct edge is prohibited so BFS
     // must go the long way around.
-    let mut initial_visited: HashSet<usize> = HashSet::new();
+    let mut initial_visited: HashSet<usize> = HashSet::default();
     initial_visited.insert(start_gate_idx);
     let all_gate_indices: HashSet<usize> = (0..gates.len()).collect();
 
-    let mut prohibited_edges: HashSet<(Point, Point)> = HashSet::new();
+    let mut prohibited_edges: HashSet<(Point, Point)> = HashSet::default();
     prohibited_edges.insert((start, goal));
     prohibited_edges.insert((goal, start));
 
     // --- Phase 1: BFS with forced gate crossing + rewind ---
     let max_rewinds = gates.len() + 2;
     let mut best_path: Option<Vec<Point>> = None;
-    let mut best_visited: HashSet<usize> = HashSet::new();
+    let mut best_visited: HashSet<usize> = HashSet::default();
 
     for rewind in 0..max_rewinds {
         let result = bfs_forced_gates(
@@ -1166,7 +1166,7 @@ fn build_gated_boundary(
         if rewind_point + 1 < bfs.path.len() {
             let from = bfs.path[rewind_point];
             let wrong_next = bfs.path[rewind_point + 1];
-            eprintln!(
+            log::debug!(
                 "  R{}: rewind {}: prohibiting ({},{}) -> ({},{})",
                 region.id, rewind + 1,
                 from.x, from.y, wrong_next.x, wrong_next.y,
@@ -1179,11 +1179,11 @@ fn build_gated_boundary(
     }
 
     let Some(mut path) = best_path else {
-        eprintln!("  R{}: BFS failed to find path", region.id);
+        log::warn!("  R{}: BFS failed to find path", region.id);
         for (gi, gate) in gates.iter().enumerate() {
             let d0 = adj_graph.get(&gate[0]).map(|n| n.len()).unwrap_or(0);
             let d1 = adj_graph.get(&gate[1]).map(|n| n.len()).unwrap_or(0);
-            eprintln!(
+            log::debug!(
                 "    gate{} ({},{})deg{} <-> ({},{})deg{} obst [{}, {}]",
                 gi, gate[0].x, gate[0].y, d0, gate[1].x, gate[1].y, d1,
                 gate_obstacle_ids[gi][0], gate_obstacle_ids[gi][1],
@@ -1232,7 +1232,7 @@ fn build_gated_boundary(
         let invaded = &contours[invaded_id - 1];
 
         // Identify traversed vs non-traversed edges on the invaded obstacle
-        let mut path_edges: HashSet<(Point, Point)> = HashSet::new();
+        let mut path_edges: HashSet<(Point, Point)> = HashSet::default();
         for i in 0..path.len() - 1 {
             path_edges.insert((path[i], path[i + 1]));
             path_edges.insert((path[i + 1], path[i]));
@@ -1256,7 +1256,7 @@ fn build_gated_boundary(
             }
         }
 
-        eprintln!(
+        log::debug!(
             "  R{}: invasion of O{} ({} contour pts), eliminated {} edges, retained {} edges (attempt {})",
             region.id, invaded_id, invaded.points.len(),
             eliminated_arc.len().saturating_sub(1),
@@ -1304,7 +1304,7 @@ fn build_gated_boundary(
 
     // Return the last invaded path for diagnostic rendering
     if let Some(p) = last_invaded_path {
-        eprintln!("  R{}: invading boundary kept after retries", region.id);
+        log::debug!("  R{}: invading boundary kept after retries", region.id);
         return BoundaryResult {
             polygon: Some(p),
             invading: true,
@@ -1316,7 +1316,7 @@ fn build_gated_boundary(
         };
     }
 
-    eprintln!("  R{}: boundary failed after retries", region.id);
+    log::warn!("  R{}: boundary failed after retries", region.id);
     BoundaryResult {
         polygon: None,
         invading: false,
@@ -1374,7 +1374,7 @@ fn find_last_gate_crossing(
     gates: &[[Point; 2]],
     start_gate_idx: usize,
 ) -> Option<usize> {
-    let mut gate_edges: HashSet<(Point, Point)> = HashSet::new();
+    let mut gate_edges: HashSet<(Point, Point)> = HashSet::default();
     for (i, gate) in gates.iter().enumerate() {
         if i == start_gate_idx {
             continue;
@@ -1397,7 +1397,7 @@ fn is_on_map_edge(p: Point, width: i32, height: i32) -> bool {
 }
 
 fn get_map_edge_path(from: Point, to: Point, width: i32, height: i32) -> Option<Vec<Point>> {
-    let mut map_graph: HashMap<Point, Vec<Point>> = HashMap::new();
+    let mut map_graph: HashMap<Point, Vec<Point>> = HashMap::default();
     let corners = [
         Point::new(1, 1),
         Point::new(width - 2, 1),
@@ -1513,7 +1513,7 @@ pub fn remove_duplicate_regions(regions: &mut Vec<Region>, chokepoints: &mut [Ch
                     i
                 };
                 to_remove.push(loser);
-                eprintln!(
+                log::debug!(
                     "Duplicate territory: R{} vs R{} -> removing R{}",
                     regions[i].id, regions[j].id, regions[loser].id
                 );

@@ -779,7 +779,24 @@ fn print_usage() {
     eprintln!("  --timeout <secs>        Per-tier timeout in seconds (default: {})", DEFAULT_TIMEOUT_SECS);
 }
 
+/// The library logs through the `log` facade; print everything to stderr
+/// exactly as the library's former `eprintln!`s did.
+struct StderrLogger;
+
+impl log::Log for StderrLogger {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        eprintln!("{}", record.args());
+    }
+
+    fn flush(&self) {}
+}
+
 fn main() {
+    let _ = log::set_logger(&StderrLogger).map(|()| log::set_max_level(log::LevelFilter::Debug));
     let args: Vec<String> = std::env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
