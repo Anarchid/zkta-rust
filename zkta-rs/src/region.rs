@@ -904,10 +904,23 @@ fn bfs_forced_gates(
         processed.insert(point);
 
         if point == goal {
+            // A forced gate crossing overwrites the partner's `prev` entry,
+            // which can close a cycle: a point that ends two gates crosses
+            // the first one without a normal expansion, and is reached again
+            // later through the far end of the second.  A chain without a
+            // cycle has at most `prev.len() + 1` points, so a longer one
+            // would loop (and grow `path`) forever.  Give up on this search.
             let mut path = Vec::new();
             let mut p = goal;
             loop {
                 path.push(p);
+                if path.len() > prev.len() + 1 {
+                    log::debug!(
+                        "  forced-gate BFS: cycle in the predecessor chain to ({},{})",
+                        goal.x, goal.y,
+                    );
+                    return None;
+                }
                 match prev.get(&p) {
                     Some(&pr) => p = pr,
                     None => break,
@@ -1538,4 +1551,74 @@ fn polygons_equal(a: &[Point], b: &[Point]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).all(|(a, b)| a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gate_lookup(gates: &[[Point; 2]]) -> HashMap<Point, Vec<(Point, usize)>> {
+        let mut gate_map: HashMap<Point, Vec<(Point, usize)>> = HashMap::default();
+        for (i, gate) in gates.iter().enumerate() {
+            gate_map.entry(gate[0]).or_default().push((gate[1], i));
+            gate_map.entry(gate[1]).or_default().push((gate[0], i));
+        }
+        gate_map
+    }
+
+    fn graph_of(edges: &[(Point, Point)]) -> HashMap<Point, Vec<Point>> {
+        let mut graph: HashMap<Point, Vec<Point>> = HashMap::default();
+        for &(a, b) in edges {
+            graph.entry(a).or_default().push(b);
+            graph.entry(b).or_default().push(a);
+        }
+        graph
+    }
+
+    /// Runs the BFS from the start gate's first point to its second, with
+    /// that gate pre-visited and its direct edge prohibited (as
+    /// `build_gated_boundary` does).  Panics instead of hanging if the
+    /// search does not return.
+    fn run(edges: &[(Point, Point)], gates: &[[Point; 2]]) -> Option<Vec<Point>> {
+        let graph = graph_of(edges);
+        let gate_map = gate_lookup(gates);
+        let [start, goal] = gates[0];
+        let mut initial: HashSet<usize> = HashSet::default();
+        initial.insert(0);
+        let mut prohibited: HashSet<(Point, Point)> = HashSet::default();
+        prohibited.insert((start, goal));
+        prohibited.insert((goal, start));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = bfs_forced_gates(&graph, start, goal, &gate_map, &initial, &prohibited);
+            let _ = tx.send(r.map(|b| b.path));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("bfs_forced_gates did not return")
+    }
+
+    #[test]
+    fn forced_gate_bfs_walks_around() {
+        let (s, a, g) = (Point::new(0, 0), Point::new(1, 1), Point::new(2, 0));
+        let path = run(&[(s, a), (a, g)], &[[s, g]]);
+        assert_eq!(path, Some(vec![s, a, g]));
+    }
+
+    /// P ends gates 1 and 2.  P's first pop crosses gate 1 to Q without
+    /// expanding P's edges; the walk Q - X then crosses gate 2 back to P,
+    /// overwriting prev[P] and closing the cycle P -> X -> Q -> P.  The goal
+    /// is then reached through P, and rebuilding its path used to loop
+    /// forever (growing ~0.4 GB/s).
+    #[test]
+    fn forced_gate_bfs_cycle_returns() {
+        let (s, p, q, x, g) = (
+            Point::new(0, 0),
+            Point::new(1, 0),
+            Point::new(2, 0),
+            Point::new(3, 0),
+            Point::new(4, 0),
+        );
+        let path = run(&[(s, p), (p, g), (q, x)], &[[s, g], [p, q], [x, p]]);
+        assert_eq!(path, None);
+    }
 }
